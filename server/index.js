@@ -7,6 +7,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const TICKET_TTL_MS = 60_000;
 const STATE_TTL_SECONDS = 300;
 const pendingTickets = new Map();
+const activeSessions = new Map();
 
 function sendJson(res, status, data) {
   res.writeHead(status, {
@@ -121,6 +122,61 @@ function cleanTickets() {
   }
 }
 
+function cleanSessions() {
+  const now = Date.now();
+  for (const [sessionToken, record] of activeSessions) {
+    if (!record || record.expiresAt <= now) activeSessions.delete(sessionToken);
+  }
+}
+
+async function refreshDiscordAccessToken(record) {
+  const config = getConfig();
+  const refreshResponse = await fetch('https://discord.com/api/oauth2/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      grant_type: 'refresh_token',
+      refresh_token: record.refreshToken
+    })
+  });
+
+  const refreshed = await refreshResponse.json().catch(() => ({}));
+  if (!refreshResponse.ok || !refreshed.access_token) {
+    throw new Error('Discord session expired. Please link your account again.');
+  }
+
+  record.accessToken = refreshed.access_token;
+  record.refreshToken = refreshed.refresh_token || record.refreshToken;
+  record.expiresAt = Date.now() + (Number(refreshed.expires_in) || 604800) * 1000;
+  return record;
+}
+
+async function getFreshDiscordUser(record) {
+  const accessToken = record.accessToken;
+  const profileResponse = await fetch('https://discord.com/api/users/@me', {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+
+  if (!profileResponse.ok) {
+    if (record.refreshToken) {
+      await refreshDiscordAccessToken(record);
+      const refreshedProfile = await fetch('https://discord.com/api/users/@me', {
+        headers: { authorization: `Bearer ${record.accessToken}` }
+      });
+      const refreshedData = await refreshedProfile.json();
+      if (!refreshedProfile.ok || !refreshedData.id) throw new Error('Discord profile could not be refreshed.');
+      return refreshedData;
+    }
+    throw new Error('Discord profile lookup failed.');
+  }
+
+  const profileData = await profileResponse.json();
+  if (!profileData.id) throw new Error('Discord profile lookup failed.');
+  return profileData;
+}
+
 async function startDiscordAuth(res) {
   const config = getConfig();
   const state = crypto.randomBytes(32).toString('hex');
@@ -200,14 +256,24 @@ async function finishDiscordAuth(req, res, requestUrl) {
 
   cleanTickets();
   const ticket = crypto.randomBytes(32).toString('hex');
+  const profile = {
+    id: profileData.id,
+    username: profileData.username,
+    global_name: profileData.global_name || profileData.username,
+    avatar: profileData.avatar || null
+  };
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  activeSessions.set(sessionToken, {
+    userId: profileData.id,
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token || '',
+    expiresAt: Date.now() + (Number(tokenData.expires_in) || 604800) * 1000,
+    profile
+  });
   pendingTickets.set(ticket, {
     expiresAt: Date.now() + TICKET_TTL_MS,
-    profile: {
-      id: profileData.id,
-      username: profileData.username,
-      globalName: profileData.global_name || profileData.username,
-      avatar: profileData.avatar || null
-    }
+    profile,
+    sessionToken
   });
 
   const redirect = new URL(config.appUri);
@@ -231,7 +297,43 @@ async function exchangeTicket(req, res) {
     return;
   }
   pendingTickets.delete(ticket);
-  sendJson(res, 200, { user: record.profile });
+  const sessionRecord = activeSessions.get(record.sessionToken);
+  sendJson(res, 200, { user: record.profile, sessionToken: record.sessionToken, session: !!sessionRecord });
+}
+
+async function refreshDiscordSession(req, res) {
+  const body = await readJson(req);
+  const sessionToken = typeof body.sessionToken === 'string' ? body.sessionToken : '';
+  if (!sessionToken) {
+    sendJson(res, 400, { error: 'Discord session token is required.' });
+    return;
+  }
+  cleanSessions();
+  const record = activeSessions.get(sessionToken);
+  if (!record) {
+    sendJson(res, 401, { error: 'Discord session expired. Please link your account again.' });
+    return;
+  }
+
+  try {
+    if (!record.refreshToken && record.expiresAt <= Date.now()) {
+      throw new Error('Discord session expired. Please link your account again.');
+    }
+    if (record.expiresAt <= Date.now() + 60_000 && record.refreshToken) {
+      await refreshDiscordAccessToken(record);
+    }
+    const userData = await getFreshDiscordUser(record);
+    record.profile = {
+      id: userData.id,
+      username: userData.username,
+      global_name: userData.global_name || userData.username,
+      avatar: userData.avatar || null
+    };
+    sendJson(res, 200, { user: record.profile });
+  } catch (error) {
+    activeSessions.delete(sessionToken);
+    sendJson(res, 401, { error: error.message || 'Discord session expired. Please link your account again.' });
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -249,6 +351,8 @@ const server = http.createServer(async (req, res) => {
       await finishDiscordAuth(req, res, requestUrl);
     } else if (req.method === 'POST' && requestUrl.pathname === '/auth/discord/exchange') {
       await exchangeTicket(req, res);
+    } else if (req.method === 'POST' && requestUrl.pathname === '/auth/discord/session') {
+      await refreshDiscordSession(req, res);
     } else {
       sendJson(res, 404, { error: 'Not found.' });
     }

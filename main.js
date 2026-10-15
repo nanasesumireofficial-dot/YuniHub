@@ -9,6 +9,7 @@ const isWin = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
 const isLinux = process.platform === 'linux';
 const APP_MODE = process.argv.includes('--dev') ? 'dev' : 'release';
+const AUTH_SERVER_URL = (process.env.YUNIHUB_AUTH_URL || process.env.AUTH_SERVER_URL || 'https://yunihub-production.up.railway.app').replace(/\/$/, '');
 
 const THEMES = {
   dark: { color: '#05070d', symbolColor: '#d9dcff' },
@@ -161,6 +162,80 @@ async function openInCode(folder) {
     return r.ok ? r : { ok: false, error: r.error.includes('ENOENT') ? 'VS Code is not on your PATH (the "code" command).' : r.error };
   } catch (e) {
     return { ok: false, error: e.message };
+  }
+}
+
+function sendDiscordAuthResult(payload) {
+  if (win && win.webContents) win.webContents.send('discord:auth-result', payload);
+}
+
+function parseDiscordProtocolUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ''));
+    if (url.protocol !== 'yunihub:' || url.hostname !== 'discord-auth') return null;
+    return {
+      ticket: url.searchParams.get('ticket') || '',
+      error: url.searchParams.get('error') || ''
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function exchangeDiscordTicket(ticket) {
+  ticket = str(ticket, 200);
+  if (!ticket) return { ok: false, error: 'No sign-in ticket was returned by Discord.' };
+  try {
+    const res = await fetch(`${AUTH_SERVER_URL}/auth/discord/exchange`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticket })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data || !data.user) {
+      const msg = data && data.error ? data.error : 'Discord sign-in could not be completed.';
+      return { ok: false, error: msg };
+    }
+    return { ok: true, user: data.user, sessionToken: data.sessionToken || '' };
+  } catch (e) {
+    return { ok: false, error: e && e.message ? e.message : 'Discord sign-in failed.' };
+  }
+}
+
+async function handleDiscordProtocol(rawUrl) {
+  const parsed = parseDiscordProtocolUrl(rawUrl);
+  if (!parsed) return;
+  if (parsed.error) {
+    const message = parsed.error === 'discord_consent_denied' ? 'Discord sign-in was cancelled.' : 'Discord sign-in failed.';
+    sendDiscordAuthResult({ ok: false, error: message });
+    return;
+  }
+  const result = await exchangeDiscordTicket(parsed.ticket);
+  if (result && result.ok && result.sessionToken) {
+    const payload = { ok: true, user: result.user, sessionToken: result.sessionToken };
+    sendDiscordAuthResult(payload);
+    return;
+  }
+  sendDiscordAuthResult(result);
+}
+
+async function refreshDiscordSession(sessionToken) {
+  sessionToken = str(sessionToken, 200);
+  if (!sessionToken) return { ok: false, error: 'No active Discord session was found.' };
+  try {
+    const res = await fetch(`${AUTH_SERVER_URL}/auth/discord/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionToken })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data || !data.user) {
+      const msg = data && data.error ? data.error : 'Discord session expired.';
+      return { ok: false, error: msg };
+    }
+    return { ok: true, user: data.user };
+  } catch (e) {
+    return { ok: false, error: e && e.message ? e.message : 'Discord session refresh failed.' };
   }
 }
 
@@ -394,6 +469,19 @@ function registerIpc() {
     }
   });
 
+  handle('app:discordAuth', async () => {
+    try {
+      const url = `${AUTH_SERVER_URL}/auth/discord`;
+      await shell.openExternal(url);
+      return { ok: true, url };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : 'Could not open the Discord sign-in page.' };
+    }
+  });
+
+  handle('app:discordExchange', async (ticket) => exchangeDiscordTicket(ticket));
+  handle('app:discordSession', async (sessionToken) => refreshDiscordSession(sessionToken));
+
   // Dropped files give a path. For the "project folder" field we want the folder itself.
   handle('path:dir', (p) => {
     p = str(p, 1000);
@@ -547,7 +635,9 @@ function createWindow() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    const incoming = argv.find((arg) => /^yunihub:\/\//.test(arg));
+    if (incoming) handleDiscordProtocol(incoming);
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -555,14 +645,30 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    try {
+      if (app.isPackaged) {
+        app.setAsDefaultProtocolClient('yunihub');
+      } else {
+        const appEntry = path.resolve(process.argv[1] || '.');
+        const protocolArgs = [appEntry, ...(APP_MODE === 'dev' ? ['--dev'] : [])];
+        app.setAsDefaultProtocolClient('yunihub', process.execPath, protocolArgs);
+      }
+    } catch { /* protocol registration is best effort */ }
     Menu.setApplicationMenu(null);
     registerIpc();
     createWindow();
     const saved = loadData();
     if (saved && saved.settings) applyPrefs(saved.settings);
+    const initialUrl = process.argv.find((arg) => /^yunihub:\/\//.test(arg));
+    if (initialUrl) setTimeout(() => handleDiscordProtocol(initialUrl), 150);
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+  });
+
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    handleDiscordProtocol(url);
   });
 
   app.on('before-quit', () => { quitting = true; });

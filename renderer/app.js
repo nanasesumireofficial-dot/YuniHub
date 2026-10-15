@@ -14,7 +14,11 @@
       info: async () => ({ version: 'dev', platform: 'browser', dataFile: 'browser storage', backupDir: '', openAtLogin: false, buildMode: 'dev' }),
       setLogin: async (v) => v, setTheme: async () => true, setPrefs: async () => ({ hotkeyOk: true }),
       exportData: no, importData: no, dirOf: async (p) => p, pathFor: () => '',
-      weather: async () => ({ ok: false, error: 'Desktop app only' }), autoload: no, rpcConnect: no,
+      weather: async () => ({ ok: false, error: 'Desktop app only' }), autoload: no,
+      discordAuth: async () => ({ ok: true, url: 'https://yunihub-production.up.railway.app/auth/discord' }),
+      discordExchange: async () => ({ ok: false, error: 'Desktop app only' }),
+      discordSession: async () => ({ ok: false, error: 'Desktop app only' }),
+      onDiscordAuth: () => {}, rpcConnect: no,
       rpcDisconnect: async () => true, setActivity: async () => false, setBeacons: async () => ({ ok: true }), saveUserscript: no
     };
   }
@@ -86,7 +90,7 @@
   }
 
   /* ---------- data ---------- */
-  const EXTRA = { city: '', exe: '', scripts: '', autoexec: '', rpcMode: 'release', rpcDev: '', rpcRelease: '', beacons: { youtube: false, twitch: false } };
+  const EXTRA = { city: '', exe: '', scripts: '', autoexec: '', rpcMode: 'release', rpcDev: '', rpcRelease: '', discordUser: null, beacons: { youtube: false, twitch: false } };
   let appMode = 'release';
   const canEditProjects = () => appMode === 'dev';
   const gateProjectEditor = (msg = 'This feature is available in developer mode only.') => {
@@ -104,7 +108,7 @@
   function defaults() {
     return {
       version: 2,
-      settings: { name: '', hubName: 'YuniHub', theme: 'dark', sort: 'manual', closeToTray: false, hotkey: false, welcomeSeen: false, ...EXTRA, beacons: { ...EXTRA.beacons } },
+      settings: { name: '', hubName: 'YuniHub', theme: 'dark', sort: 'manual', closeToTray: false, hotkey: false, compactMode: false, reduceMotion: false, welcomeSeen: false, welcomeVersion: 0, ...EXTRA, beacons: { ...EXTRA.beacons }, discordUser: null },
       projects: [
         mkProject('Instagram Client', 'Your own Android client for browsing Instagram.', 'Android', 'camera',
           ['Add it to the hub', 'Pick the app architecture', 'Sign-in and session storage', 'Home feed screen', 'Profile screen', 'Photo and video viewer', 'Direct messages', 'Settings and theming']),
@@ -156,8 +160,14 @@
         theme: s.theme === 'rei' ? 'rei' : 'dark',
         sort: SORTS.some((x) => x[0] === s.sort) ? s.sort : 'manual',
         closeToTray: !!s.closeToTray, hotkey: !!s.hotkey, welcomeSeen: !!s.welcomeSeen,
+        compactMode: !!s.compactMode, reduceMotion: !!s.reduceMotion,
+        welcomeVersion: s.welcomeVersion === 1 ? 1 : 0,
         city: clip(s.city, 80), exe: clip(s.exe, 500), scripts: clip(s.scripts, 500), autoexec: clip(s.autoexec, 500),
         rpcMode: s.rpcMode === 'dev' ? 'dev' : 'release', rpcDev: clip(s.rpcDev, 30), rpcRelease: clip(s.rpcRelease, 30),
+        discordUser: s.discordUser && typeof s.discordUser === 'object' ? {
+          id: clip(s.discordUser.id, 40), username: clip(s.discordUser.username, 40), global_name: clip(s.discordUser.global_name, 80), avatar: s.discordUser.avatar || null
+        } : null,
+        discordSession: clip(s.discordSession, 200),
         beacons: { youtube: !!(s.beacons && s.beacons.youtube), twitch: !!(s.beacons && s.beacons.twitch) }
       },
       projects: d.projects.slice(0, 200).map(normProject)
@@ -167,7 +177,7 @@
   /* ---------- state ---------- */
   let S = defaults();
   let info = { version: '', platform: '', dataFile: '', backupDir: '', openAtLogin: false };
-  const ui = { view: 'home', id: null, modal: false, confirmDel: false, q: '', editTask: null };
+  const ui = { view: 'home', id: null, modal: false, confirmDel: false, q: '', editTask: null, welcomeStep: 0 };
   const drafts = {};
   const pal = { open: false, q: '', sel: 0 };
   let rpcUser = null;
@@ -198,6 +208,8 @@
 
   function applyTheme() {
     document.documentElement.setAttribute('data-theme', S.settings.theme);
+    document.documentElement.setAttribute('data-density', S.settings.compactMode ? 'compact' : 'comfortable');
+    document.documentElement.setAttribute('data-motion', S.settings.reduceMotion ? 'reduced' : 'full');
     API.setTheme(S.settings.theme);
   }
 
@@ -290,9 +302,71 @@
     return `<div class="sec-head"><h2>${cat === 'Discord' ? 'Discord Status' : cat}</h2></div>${toolGrid(cat)}${extra}`;
   }
 
+  function discordAvatarUrl(user) {
+    if (!user || !user.id || !user.avatar) return '';
+    const format = user.avatar.startsWith('a_') ? 'gif' : 'png';
+    return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${format}?size=256`;
+  }
+
+  function discordApplicationId() {
+    return appMode === 'dev' ? S.settings.rpcDev : S.settings.rpcRelease;
+  }
+
+  function welcomeMarkup() {
+    const step = Math.max(0, Math.min(2, ui.welcomeStep));
+    const hasDiscordApp = !!discordApplicationId();
+    const content = [
+      {
+        label: 'A HOME FOR WHAT YOU BUILD',
+        title: 'Welcome to YuniHub.',
+        copy: 'Keep the projects you care about, the next steps, and the tools to launch them together.',
+        visual: `<div class="welcome-brand-panel"><img src="../yunihub-logo-wordmark.svg" alt="YuniHub" /><span>PROJECTS <i></i> PROGRESS <i></i> MOMENTUM</span></div>`
+      },
+      {
+        label: 'MAKE PROGRESS VISIBLE',
+        title: 'Turn big ideas into next steps.',
+        copy: 'Group your work by project, track tasks and status, and keep launch shortcuts close. Your workspace stays right here on your PC.',
+        visual: `<div class="welcome-preview" aria-hidden="true"><div class="preview-top"><span></span><span></span><span></span><b>YOUR WORKSPACE</b></div><div class="preview-project"><i class="preview-icon">${svg('package')}</i><div><b>Project Atlas</b><span>Building · 4 of 6 tasks</span></div><div class="preview-meter"><i></i></div></div><div class="preview-project"><i class="preview-icon alt">${svg('code')}</i><div><b>Studio tools</b><span>Idea · 2 next steps</span></div><div class="preview-meter low"><i></i></div></div><div class="preview-footer"><span>2 projects</span><span>6 tasks complete</span></div></div>`
+      },
+      {
+        label: 'OPTIONAL DISCORD CONNECTION',
+        title: 'Bring your current project along.',
+        copy: 'Connect Discord to show what you are working on in your profile and sync your linked display name and avatar in YuniHub. You can skip this and connect later in Settings.',
+        visual: `<div class="welcome-presence" aria-hidden="true"><div class="presence-avatar">${svg('chat')}<i></i></div><div class="presence-copy"><span>DISCORD PRESENCE</span><b>Building Project Atlas</b><small>YuniHub · Project workspace</small></div><i class="presence-live"></i></div><p class="welcome-privacy">Connection is optional. YuniHub never asks for your Discord password.</p>`
+      }
+    ][step];
+    return `<div class="splash-glow"></div><section class="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+      <div class="welcome-art" data-step="${step}">${content.visual}</div>
+      <div class="welcome-content">
+        <span class="welcome-kicker">${content.label}</span>
+        <h1 id="welcome-title">${content.title}</h1>
+        <p class="welcome-intro">${content.copy}</p>
+        <div class="welcome-progress" aria-label="Step ${step + 1} of 3">
+          ${[0, 1, 2].map((index) => `<i${index === step ? ' class="active"' : ''}></i>`).join('')}
+          <span>${step + 1} / 3</span>
+        </div>
+        <div class="welcome-actions">
+          ${step > 0 ? '<button class="btn" data-act="welcome-back">Back</button>' : '<button class="textbtn" data-act="welcome-continue">Skip tour</button>'}
+          ${step < 2
+            ? '<button class="btn primary" data-act="welcome-next">Continue</button>'
+            : `<button class="btn primary" data-act="${hasDiscordApp ? 'welcome-discord' : 'welcome-settings'}">${hasDiscordApp ? 'Connect Discord' : 'Discord settings'}</button><button class="textbtn" data-act="welcome-continue">Finish without Discord</button>`}
+        </div>
+      </div>
+    </section>`;
+  }
+
+  function finishWelcome() {
+    S.settings.welcomeSeen = true;
+    S.settings.welcomeVersion = 1;
+    touch();
+    const splash = document.getElementById('splash');
+    if (splash) splash.classList.add('hidden');
+  }
+
   function intPanel() {
     const s = S.settings;
     const detectedCity = s.city || info.weatherCity || 'Detecting your weather city...';
+    const discordUser = s.discordUser || rpcUser;
     const f = (label, key, ph, kind) => `<div class="field"><label class="label" for="s-${key}">${label}</label><div class="row nowrap">
       <input class="in" id="s-${key}" data-set="${key}" value="${esc(s[key])}" placeholder="${ph}" spellcheck="false">
       ${kind ? `<button class="btn" data-act="setpick" data-f="${key}" data-v="${kind}" data-k="pk-${key}">Browse</button>` : ''}</div></div>`;
@@ -303,16 +377,57 @@
       ${f('Scripts folder', 'scripts', 'Folder with your Yuniku scripts', 'folder')}
       ${f('Executor autoexec folder', 'autoexec', 'Where your executor auto-runs scripts', 'folder')}
       ${f('Discord app ID (release)', 'rpcRelease', 'Application ID')}
-      ${f('Discord app ID (dev)', 'rpcDev', 'Application ID')}</section>`;
+      ${f('Discord app ID (dev)', 'rpcDev', 'Application ID')}
+      <div class="field">
+        <label class="label">Discord account perks</label>
+        <div class="help">${discordUser ? `Linked as ${esc(discordUser.global_name || discordUser.username || 'Discord user')}. Unlocks live profile sync, better support, and future YuniHub beta perks.` : 'Link your Discord account to unlock live profile sync, future beta access, uptime and status checks, and a cleaner YuniHub identity.'}</div>
+      </div></section>`;
   }
 
   async function connectRpc() {
     const s = S.settings;
-    const r = await API.rpcConnect(s.rpcMode === 'dev' ? s.rpcDev : s.rpcRelease);
+    if (API.discordAuth) {
+      const auth = await API.discordAuth();
+      if (auth && auth.ok) {
+        toast('Discord sign-in opened in your browser. Finish the browser flow and then return here.', 'ok');
+      } else if (auth && auth.error) {
+        toast(auth.error, 'err');
+      }
+    }
+    const id = discordApplicationId();
+    if (!id) {
+      render();
+      return;
+    }
+    const r = await API.rpcConnect(id);
     rpcUser = r && r.ok ? r.user : null;
     render();
     if (!r || !r.ok) toast((r && r.error) || 'Could not link Discord.', 'err');
     else updateDiscordActivity();
+  }
+
+  async function refreshDiscordProfile() {
+    if (!S.settings.discordSession || !API.discordSession) return;
+    const r = await API.discordSession(S.settings.discordSession);
+    if (!r || !r.ok || !r.user) {
+      if (r && r.error && /expired|session/i.test(r.error)) {
+        S.settings.discordSession = '';
+        S.settings.discordUser = null;
+        rpcUser = null;
+        touch();
+        render();
+      }
+      return;
+    }
+    const prev = JSON.stringify(S.settings.discordUser || null);
+    const next = JSON.stringify(r.user || null);
+    S.settings.discordUser = r.user;
+    rpcUser = r.user;
+    if (prev !== next) {
+      touch();
+      render();
+    }
+    updateDiscordActivity();
   }
 
   function updateDiscordActivity() {
@@ -359,10 +474,12 @@
       `<button class="nav-item${cur === v ? ' on' : ''}" data-act="nav" data-v="${v}" data-k="nav-${v}">
         <span class="nav-ic">${svg(icon)}</span><span>${label}</span>${count != null ? `<em>${count}</em>` : ''}</button>`;
     const recent = S.projects.filter((p) => p.opened).sort((a, b) => b.opened - a.opened).slice(0, 3);
+    const linkedUser = S.settings.discordUser || rpcUser;
+    const avatarUrl = discordAvatarUrl(linkedUser);
     return `<aside class="side">
-      <div class="logo">
-        <svg class="logo-mark" viewBox="0 0 44 48" aria-hidden="true"><polygon points="22,2 41,13 41,35 22,46 3,35 3,13" fill="none" style="stroke:var(--a1)" stroke-width="2.4"/><polygon points="22,12 32,18 32,30 22,36 12,30 12,18" style="fill:var(--a2)"/></svg>
-        <b>${esc(S.settings.hubName)}<i></i></b>
+      <div class="logo" aria-label="YuniHub">
+        <img class="brand-icon" src="../build/yunihub-icon.svg" alt="" />
+        <span class="brand-name"><span>Yuni</span><b>Hub</b></span>
       </div>
       <button class="searchbtn" data-act="palette" data-k="palette">${svg('search')}<span>Search</span><kbd>Ctrl K</kbd></button>
       <nav class="nav" aria-label="Main">
@@ -378,15 +495,17 @@
         `<button class="rec${ui.view === 'project' && ui.id === p.id ? ' on' : ''}" data-act="open" data-id="${p.id}" data-k="rc-${p.id}">${svg(p.icon)}<span>${esc(p.name)}</span></button>`).join('')}</div>` : ''}
       <div class="spacer"></div>
       <div class="sync-card">
-        <span class="label dot-label"><i class="dot${rpcUser ? '' : ' off'}"></i>${rpcUser ? 'Discord linked' : 'Discord not linked'}</span>
-        ${rpcUser
-          ? `<button class="btn danger" data-act="rpcout" data-k="rpcout">Disconnect</button><span class="rpc-user">${esc(rpcUser.global_name || rpcUser.username || '')}</span>`
+        <span class="label dot-label"><i class="dot${linkedUser ? '' : ' off'}"></i>${linkedUser ? 'Discord linked' : 'Discord not linked'}</span>
+        ${linkedUser
+          ? `<div style="display:flex; align-items:center; gap:10px; margin:8px 0 10px;">
+              ${avatarUrl ? `<img src="${avatarUrl}" alt="Discord avatar" style="width:34px;height:34px;border-radius:50%;object-fit:cover;display:block;box-shadow:0 0 0 1px rgba(255,255,255,.15);" />` : `<div style="width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#5865f2,#7289da);font-size:12px;font-weight:700;">D</div>`}
+              <span class="rpc-user" style="max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(linkedUser.global_name || linkedUser.username || '')}</span>
+            </div>
+            <button class="btn danger" data-act="rpcout" data-k="rpcout">Disconnect</button>`
           : `<button class="btn primary" data-act="rpclink" data-k="rpclink">Connect Discord</button>`}
-        <span class="label">RPC mode</span>
-        <div class="seg" role="group" aria-label="RPC mode">
-          <button data-act="rpcmode" data-v="dev" data-k="rm-dev" aria-pressed="${S.settings.rpcMode === 'dev'}">Dev</button>
-          <button data-act="rpcmode" data-v="release" data-k="rm-rel" aria-pressed="${S.settings.rpcMode !== 'dev'}">Release</button>
-        </div>
+        <div class="help" style="margin-top:10px; line-height:1.5;">${linkedUser ? 'Unlocked: profile sync, status checks, and future YuniHub beta rewards.' : 'Link your Discord to unlock perks beyond RPC, like account-based features and beta access.'}</div>
+        <span class="label">Discord presence</span>
+        <div class="help">Using the ${appMode === 'dev' ? 'developer' : 'release'} Discord application for this build.</div>
       </div>
       <div class="ver">v${esc(info.version || '0.2.0')}</div>
     </aside>`;
@@ -430,11 +549,13 @@
             <div class="info-chip"><span class="label">Now</span><b id="c-date">${d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</b></div>
             <div class="info-chip hot"><span class="label">Time</span><b id="c-time">${d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</b></div>
             <div class="info-chip"><span class="label">Weather</span><b id="c-weather">${esc(weather)}</b></div>
+            <div class="info-chip"><span class="label">Projects</span><b>${S.projects.length}</b></div>
+            <div class="info-chip"><span class="label">Tasks done</span><b>${o.d} / ${o.t}</b></div>
           </div>
         </div>
         <div class="note"><span class="tag">Next up</span>
           <span class="t">${nx ? `<b>${esc(nx.task)}</b> in ${esc(nx.p.name)}` : 'All caught up. Add a new project to keep going.'}</span>
-          ${nx ? `<button class="icon-btn" data-act="open" data-id="${nx.p.id}" data-k="nx" aria-label="Open ${esc(nx.p.name)}">${svg('arrow')}</button>` : ''}
+          ${nx ? `<button class="btn primary" data-act="open" data-id="${nx.p.id}" data-k="nx">${svg('play')}Continue</button>` : canEditProjects() ? '<button class="btn" data-act="new" data-k="new">Add project</button>' : '<button class="btn" data-act="palette" data-k="find-project">Find project</button>'}
         </div>
       </section>`;
     }
@@ -558,6 +679,10 @@
       ${intPanel()}
       <section class="panel"><h3>Appearance</h3>
         <div class="themes">${th('dark', 'Midnight')}${th('rei', 'Rei light')}</div>
+        <div class="pref-list">
+          ${sw('compactMode', 'Compact project cards', 'Fit more projects on screen with tighter spacing.', S.settings.compactMode)}
+          ${sw('reduceMotion', 'Reduce interface motion', 'Limit movement and transitions throughout YuniHub.', S.settings.reduceMotion)}
+        </div>
       </section>
       <section class="panel"><h3>System</h3>
         ${sw('login', 'Start with Windows', 'Open the hub when you sign in.', info.openAtLogin)}
@@ -572,6 +697,10 @@
         <div class="actions"><button class="btn" data-act="export" data-k="export">Export backup</button>
           <button class="btn" data-act="import" data-k="import">Import backup</button>
           <button class="btn" data-act="openbackups" data-k="openbackups">${svg('folder')}Automatic backups</button></div>
+      </section>
+      <section class="panel"><h3>Help</h3>
+        <p class="help">Take the guided tour again to revisit projects, task tracking, and Discord presence.</p>
+        <div class="actions"><button class="btn" data-act="replaytour" data-k="replaytour">Replay welcome tour</button></div>
       </section>
       <section class="panel"><h3>About</h3>
         <p class="help">${esc(S.settings.hubName)} v${esc(info.version || '0.2.0')}</p>
@@ -848,22 +977,40 @@
       case 'mcancel': ui.modal = false; render(); break;
       case 'tool': await runTool(t.dataset.id); break;
       case 'rpclink': await connectRpc(); break;
-      case 'rpcout': await API.rpcDisconnect(); rpcUser = null; render(); break;
-      case 'welcome-continue': S.settings.welcomeSeen = true; touch(); document.getElementById('splash').classList.add('hidden'); break;
-      case 'welcome-settings': S.settings.welcomeSeen = true; touch(); document.getElementById('splash').classList.add('hidden'); go('settings'); break;
+      case 'rpcout': {
+        await API.rpcDisconnect();
+        rpcUser = null;
+        S.settings.discordUser = null;
+        S.settings.discordSession = '';
+        touch();
+        render();
+      } break;
+      case 'welcome-next': ui.welcomeStep = Math.min(2, ui.welcomeStep + 1); document.getElementById('splash').innerHTML = welcomeMarkup(); break;
+      case 'welcome-back': ui.welcomeStep = Math.max(0, ui.welcomeStep - 1); document.getElementById('splash').innerHTML = welcomeMarkup(); break;
+      case 'welcome-continue': finishWelcome(); break;
+      case 'welcome-settings': finishWelcome(); go('settings'); break;
+      case 'replaytour': {
+        ui.welcomeStep = 0;
+        S.settings.welcomeVersion = 0;
+        touch();
+        const splash = document.getElementById('splash');
+        if (splash) {
+          splash.classList.remove('hidden');
+          splash.classList.add('welcome');
+          splash.innerHTML = welcomeMarkup();
+        }
+      } break;
       case 'welcome-discord': {
-        const id = S.settings.rpcMode === 'dev' ? S.settings.rpcDev : S.settings.rpcRelease;
+        const id = discordApplicationId();
         if (!id) {
-          S.settings.welcomeSeen = true; touch();
-          document.getElementById('splash').classList.add('hidden');
+          finishWelcome();
           go('settings');
           toast('Add a Discord application ID in Settings, then connect from the sidebar.', 'err');
           break;
         }
         await connectRpc();
-        if (rpcUser) { S.settings.welcomeSeen = true; touch(); document.getElementById('splash').classList.add('hidden'); }
+        if (rpcUser) finishWelcome();
       } break;
-      case 'rpcmode': S.settings.rpcMode = t.dataset.v; touch(); if (rpcUser) connectRpc(); else render(); break;
       case 'setpick': { const pth = await API.pick(t.dataset.v); if (pth) { S.settings[t.dataset.f] = pth; touch(); render(); } } break;
       case 'ut': { const r = await API.saveUserscript(); if (r.ok) toast('Userscript saved.', 'ok'); else if (!r.canceled) toast(r.error || 'Could not save it.', 'err'); } break;
       case 'theme': S.settings.theme = t.dataset.v; applyTheme(); touch(); render(); break;
@@ -896,6 +1043,10 @@
     } else if (t.dataset && t.dataset.act === 'login') {
       info.openAtLogin = !!(await API.setLogin(t.checked));
       render();
+    } else if (t.dataset && (t.dataset.act === 'compactMode' || t.dataset.act === 'reduceMotion')) {
+      S.settings[t.dataset.act] = t.checked;
+      applyTheme();
+      touch(); render();
     } else if (t.dataset && (t.dataset.act === 'tray' || t.dataset.act === 'hotkey')) {
       if (t.dataset.act === 'tray') S.settings.closeToTray = t.checked; else S.settings.hotkey = t.checked;
       const r = await API.setPrefs({ closeToTray: S.settings.closeToTray, hotkey: S.settings.hotkey });
@@ -1065,27 +1216,37 @@
     applyTheme();
     render();
     const splash = document.getElementById('splash');
-    if (splash && !S.settings.welcomeSeen) {
-      const hasDiscordApp = !!(S.settings.rpcMode === 'dev' ? S.settings.rpcDev : S.settings.rpcRelease);
+    if (splash && S.settings.welcomeVersion < 1) {
+      ui.welcomeStep = 0;
       splash.classList.add('welcome');
-      splash.innerHTML = `<div class="splash-glow"></div><section class="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
-        <div class="welcome-mark">Y</div><span class="splash-kicker">Your workspace starts here</span>
-        <h1 id="welcome-title">Welcome to YuniHub</h1>
-        <p class="welcome-intro">Keep your projects, next steps, and launch shortcuts together. You can connect Discord now or do it later.</p>
-        <div class="welcome-benefits"><div><b>Project presence</b><span>Show the project you are working on in your Discord profile.</span></div>
-          <div><b>Media status</b><span>Optionally share YouTube or Twitch activity with your Discord presence.</span></div>
-          <div><b>Your choice</b><span>Discord desktop is required. YuniHub does not ask for your Discord password.</span></div></div>
-        <div class="welcome-actions"><button class="btn primary" data-act="${hasDiscordApp ? 'welcome-discord' : 'welcome-settings'}">${hasDiscordApp ? 'Connect Discord' : 'Set up Discord'}</button>
-          <button class="textbtn" data-act="welcome-continue">Continue without Discord</button></div>
-        <p class="welcome-note">Activity can be visible to friends according to your Discord privacy settings. This is a desktop Rich Presence connection, not Discord account sign-in.</p>
-      </section>`;
+      splash.innerHTML = welcomeMarkup();
     } else if (splash) {
-      setTimeout(() => splash.classList.add('hidden'), 320);
+      setTimeout(() => splash.classList.add('hidden'), 780);
     }
     if (firstRun) { dirty = true; flush(); } // write the starter projects once so the file exists
+    if (API.onDiscordAuth) {
+      API.onDiscordAuth((payload) => {
+        if (!payload || typeof payload !== 'object') return;
+        if (payload.ok && payload.user) {
+          rpcUser = payload.user;
+          S.settings.discordUser = payload.user;
+          S.settings.discordSession = payload.sessionToken || S.settings.discordSession || '';
+          touch();
+          if (S.settings.welcomeVersion < 1) finishWelcome();
+          render();
+          updateDiscordActivity();
+          toast(`Signed in as ${esc(payload.user.global_name || payload.user.username || 'Discord user')}.`, 'ok');
+          if (S.settings.discordSession) refreshDiscordProfile();
+        } else {
+          toast(payload.error || 'Discord sign-in failed.', 'err');
+        }
+      });
+    }
+    if (S.settings.discordSession) refreshDiscordProfile();
     API.setBeacons(S.settings.beacons);
     refreshWeather();
     setInterval(tick, 15000);
     setInterval(refreshWeather, 20 * 60 * 1000);
+    setInterval(refreshDiscordProfile, 15000);
   })();
 })();
