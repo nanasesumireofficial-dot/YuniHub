@@ -25,7 +25,7 @@ import { setPlexus } from './plexus.js';
       openScriptBackups: no,
       acknowledgeScriptBundle: async () => ({ ok: true }), watchScripts: async () => ({ ok: true }),
       onScriptsChanged: () => () => {}, onScriptsWatchError: () => () => {}, copyScripts: no,
-      discordAuth: async () => ({ ok: true, url: 'https://yunihub-production.up.railway.app/auth/discord' }),
+      discordAuth: async () => ({ ok: true, url: 'https://yunihub-production-5c47.up.railway.app/auth/discord' }),
       discordExchange: async () => ({ ok: false, error: 'Desktop app only' }),
       discordSession: async () => ({ ok: false, error: 'Desktop app only' }),
       onDiscordAuth: () => {}, rpcConnect: no,

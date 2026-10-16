@@ -11,7 +11,7 @@ const isWin = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
 const isLinux = process.platform === 'linux';
 const APP_MODE = process.argv.includes('--dev') ? 'dev' : 'release';
-const AUTH_SERVER_URL = (process.env.YUNIHUB_AUTH_URL || process.env.AUTH_SERVER_URL || 'https://yunihub-production.up.railway.app').replace(/\/$/, '');
+const AUTH_SERVER_URL = (process.env.YUNIHUB_AUTH_URL || process.env.AUTH_SERVER_URL || 'https://yunihub-production-5c47.up.railway.app').replace(/\/$/, '');
 const DEFAULT_DISCORD_APP_ID = '1511173773204652092';
 
 const THEMES = {

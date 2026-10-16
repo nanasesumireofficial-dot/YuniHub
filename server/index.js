@@ -196,7 +196,7 @@ async function startDiscordAuth(res) {
   res.end();
 }
 
-const DISCORD_UA = 'DiscordBot (https://yunihub-production.up.railway.app, 1.0)';
+const DISCORD_UA = 'DiscordBot (https://yunihub-production-5c47.up.railway.app, 1.0)';
 
 async function finishDiscordAuth(req, res, requestUrl) {
   const config = getConfig();
