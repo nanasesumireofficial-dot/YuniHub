@@ -697,6 +697,7 @@ import { createScriptSearch } from './script-search.mjs';
         S.settings.discordSession = '';
         S.settings.discordUser = null;
         rpcUser = null;
+        await disconnectDiscordPresence();
         touch();
         render();
       }
@@ -710,6 +711,7 @@ import { createScriptSearch } from './script-search.mjs';
       touch();
       render();
     }
+    if (!presenceConnected && !presenceBusy && !presenceRetryTimer && !presenceManualDisconnect) connectDiscordPresence(false, true);
     updateDiscordActivity();
   }
 
@@ -728,17 +730,29 @@ import { createScriptSearch } from './script-search.mjs';
     });
   }
 
+  function updatePresenceMessage() {
+    const element = document.getElementById('presence-message');
+    if (element) element.textContent = presenceMessage;
+  }
+
   function scheduleDiscordPresenceRetry() {
-    if (presenceManualDisconnect || presenceConnected || presenceRetryTimer || presenceRetryCount >= 12) return;
+    if (!S.settings.discordSession || presenceManualDisconnect || presenceConnected || presenceRetryTimer) return;
+    const delay = Math.min(5000 + presenceRetryCount * 2000, 30000);
     presenceRetryTimer = setTimeout(() => {
       presenceRetryTimer = null;
       presenceRetryCount += 1;
       connectDiscordPresence(false, true);
-    }, 5000);
+    }, delay);
   }
 
   async function connectDiscordPresence(showToast = true, automatic = false) {
     if (presenceBusy || presenceConnected || (automatic && presenceManualDisconnect)) return;
+    if (!S.settings.discordSession) {
+      presenceMessage = 'Sign in with Discord to unlock Rich Presence. Guest mode keeps local projects and tools available.';
+      if (showToast) toast('Link your Discord account before connecting Rich Presence.', 'err');
+      if (!automatic) render();
+      return;
+    }
     if (!automatic) {
       presenceManualDisconnect = false;
       presenceRetryCount = 0;
@@ -746,14 +760,15 @@ import { createScriptSearch } from './script-search.mjs';
       presenceRetryTimer = null;
     }
     presenceBusy = true;
-    presenceMessage = 'Connecting to the Discord desktop app...';
+    presenceMessage = automatic ? 'Waiting for the Discord desktop app...' : 'Connecting to the Discord desktop app...';
     if (!automatic) render();
+    else updatePresenceMessage();
     const result = await API.rpcConnect('');
     presenceBusy = false;
     presenceConnected = !!(result && result.ok);
     presenceMessage = presenceConnected
       ? `Connected to Discord${result.user && result.user.username ? ` as ${result.user.username}` : ''}.`
-      : (result && result.error) || 'Could not connect to Discord Rich Presence.';
+      : `${(result && result.error) || 'Could not connect to Discord Rich Presence.'} Retrying automatically.`;
     if (presenceConnected) {
       presenceRetryCount = 0;
       clearTimeout(presenceRetryTimer);
@@ -761,6 +776,7 @@ import { createScriptSearch } from './script-search.mjs';
       updateDiscordActivity();
     } else if (showToast) toast(presenceMessage, 'err');
     if (!automatic || presenceConnected) render();
+    else updatePresenceMessage();
     if (!presenceConnected) scheduleDiscordPresenceRetry();
   }
 
@@ -812,6 +828,7 @@ import { createScriptSearch } from './script-search.mjs';
         <span class="nav-ic">${svg(icon)}</span><span>${label}</span>${count != null ? `<em>${count}</em>` : ''}</button>`;
     const recent = S.projects.filter((p) => p.opened).sort((a, b) => b.opened - a.opened).slice(0, 3);
     const linkedUser = S.settings.discordSession ? S.settings.discordUser : null;
+    const isDiscordLinked = !!S.settings.discordSession;
     const avatarUrl = discordAvatarUrl(linkedUser);
     return `<aside class="side">
       <div class="logo" aria-label="YuniHub">
@@ -845,13 +862,13 @@ import { createScriptSearch } from './script-search.mjs';
             </div>
             <button class="btn danger" data-act="rpcout" data-k="rpcout">Disconnect</button>`
           : `<button class="btn primary" data-act="rpclink" data-k="rpclink">Connect Discord</button>`}
-        <div class="help" style="margin-top:10px; line-height:1.5;">${linkedUser ? 'Profile sync is active: your Discord display name and avatar appear in YuniHub.' : 'Guest mode keeps projects and local tools available on this PC. Link Discord for synced display name and avatar.'}</div>
-        <span class="label dot-label"><i class="dot${presenceConnected ? '' : ' off'}"></i>Discord Rich Presence</span>
-        <div class="help">${esc(presenceMessage)}</div>
-        ${presenceConnected
-          ? '<button class="btn danger" data-act="rpc-presence-disconnect" data-k="rpc-presence-disconnect">Disconnect presence</button>'
-          : `<button class="btn" data-act="rpc-presence-connect" data-k="rpc-presence-connect"${presenceBusy ? ' disabled' : ''}>${presenceBusy ? 'Connecting...' : 'Connect presence'}</button>`}
-        <div class="help presence-config-help">${info.presenceConfigured ? 'Requires the Discord desktop app to be running.' : 'Discord Rich Presence is not configured for this build.'}</div>
+        <div class="help" style="margin-top:10px; line-height:1.5;">${isDiscordLinked ? 'Linked perks: Discord display name and avatar sync, plus automatic project Rich Presence.' : 'Guest mode: local projects and tools remain available. Sign in to sync your Discord profile and enable Rich Presence.'}</div>
+        ${isDiscordLinked ? `<span class="label dot-label"><i class="dot${presenceConnected ? '' : ' off'}"></i>${presenceConnected ? 'Rich Presence active' : 'Discord Rich Presence'}</span>
+          <div class="help" id="presence-message">${esc(presenceMessage)}</div>
+          ${presenceConnected
+            ? '<button class="btn danger" data-act="rpc-presence-disconnect" data-k="rpc-presence-disconnect">Disconnect presence</button>'
+            : `<button class="btn" data-act="rpc-presence-connect" data-k="rpc-presence-connect"${presenceBusy ? ' disabled' : ''}>${presenceBusy ? 'Connecting...' : 'Connect presence'}</button>`}
+          <div class="help presence-config-help">${info.presenceConfigured ? 'Keep the Discord desktop app running for live status.' : 'Rich Presence is not configured for this build.'}</div>` : ''}
       </div>
       <div class="ver">v${esc(info.version || '0.2.0')}</div>
     </aside>`;
@@ -1416,7 +1433,7 @@ import { createScriptSearch } from './script-search.mjs';
       case 'rpc-presence-connect': await connectDiscordPresence(); break;
       case 'rpc-presence-disconnect': await disconnectDiscordPresence(); break;
       case 'rpcout': {
-        await API.rpcDisconnect();
+        await disconnectDiscordPresence();
         rpcUser = null;
         S.settings.discordUser = null;
         S.settings.discordSession = '';
@@ -1703,20 +1720,25 @@ import { createScriptSearch } from './script-search.mjs';
     refreshScripts();
     if (API.onScriptsChanged) API.onScriptsChanged(() => refreshScripts());
     if (API.onScriptsWatchError) API.onScriptsWatchError((message) => toast(message || 'Could not watch the selected script folder.', 'err'));
-    connectDiscordPresence(false, true);
     if (API.onDiscordAuth) {
       API.onDiscordAuth((payload) => {
         if (!payload || typeof payload !== 'object') return;
         if (payload.ok && payload.user) {
+          const sessionToken = clip(payload.sessionToken, 200);
+          if (!sessionToken && !S.settings.discordSession) {
+            toast('Discord returned your profile without an active YuniHub session. Please sign in again.', 'err');
+            return;
+          }
           rpcUser = payload.user;
           S.settings.discordUser = payload.user;
-          S.settings.discordSession = payload.sessionToken || S.settings.discordSession || '';
+          S.settings.discordSession = sessionToken || S.settings.discordSession;
+          presenceManualDisconnect = false;
           touch();
           if (S.settings.welcomeVersion < 1) finishWelcome();
           render();
-          updateDiscordActivity();
-          toast(`Signed in as ${esc(payload.user.global_name || payload.user.username || 'Discord user')}.`, 'ok');
-          if (S.settings.discordSession) refreshDiscordProfile();
+          connectDiscordPresence(false, true);
+          toast(`Signed in as ${esc(payload.user.global_name || payload.user.username || 'Discord user')}. Linked perks are active.`, 'ok');
+          if (S.settings.discordSession) refreshDiscordProfile().catch(() => {});
         } else {
           toast(payload.error || 'Discord sign-in failed.', 'err');
         }
@@ -1726,7 +1748,10 @@ import { createScriptSearch } from './script-search.mjs';
       updateInfo = status || updateInfo;
       if (ui.view === 'settings') render();
     });
-    if (S.settings.discordSession) refreshDiscordProfile();
+    if (S.settings.discordSession) {
+      connectDiscordPresence(false, true);
+      refreshDiscordProfile().catch(() => {});
+    }
     API.setBeacons(S.settings.beacons);
     refreshWeather();
     setInterval(tick, 15000);
