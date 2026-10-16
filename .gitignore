@@ -1,2 +1,4 @@
 node_modules/
 dist/
+renderer/generated/
+renderer/app.bundle.js

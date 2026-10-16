@@ -1,3 +1,5 @@
+import { createScriptSearch } from './script-search.mjs';
+
 'use strict';
 (function () {
   /* ---------- bridge (falls back to a browser-only demo so index.html also opens in a plain browser) ---------- */
@@ -12,9 +14,16 @@
       pick: async () => null, launch: no, reveal: no, openCode: no, openBackups: no,
       openUrl: async (u) => { window.open(u, '_blank', 'noopener'); return { ok: true }; },
       info: async () => ({ version: 'dev', platform: 'browser', dataFile: 'browser storage', backupDir: '', openAtLogin: false, buildMode: 'dev' }),
+      updateState: async () => ({ status: 'unsupported', message: 'Update checks are available in installed builds.' }),
+      checkUpdates: no, downloadUpdate: no, installUpdate: no, onUpdateStatus: () => () => {},
       setLogin: async (v) => v, setTheme: async () => true, setPrefs: async () => ({ hotkeyOk: true }),
       exportData: no, importData: no, dirOf: async (p) => p, pathFor: () => '',
-      weather: async () => ({ ok: false, error: 'Desktop app only' }), autoload: no,
+      weather: async () => ({ ok: false, error: 'Desktop app only' }),
+      listScripts: async () => ({ ok: true, scripts: [], userFolderValid: true, bundle: {} }),
+      readScript: no, listManagedScripts: async () => ({ ok: true, scripts: [] }), removeManagedScript: no,
+      openScriptBackups: no,
+      acknowledgeScriptBundle: async () => ({ ok: true }), watchScripts: async () => ({ ok: true }),
+      onScriptsChanged: () => () => {}, onScriptsWatchError: () => () => {}, copyScripts: no,
       discordAuth: async () => ({ ok: true, url: 'https://yunihub-production.up.railway.app/auth/discord' }),
       discordExchange: async () => ({ ok: false, error: 'Desktop app only' }),
       discordSession: async () => ({ ok: false, error: 'Desktop app only' }),
@@ -52,7 +61,8 @@
     toolbox: '<rect x="3" y="8" width="18" height="12" rx="2.5"/><path d="M9 8V5.5h6V8M3 13.5h18"/>',
     chat: '<path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3.5V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/>',
     bolt: '<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>',
-    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>'
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>',
+    gamepad: '<path d="M6.4 9h11.2a4 4 0 0 1 3.8 5l-.7 2.3a2.4 2.4 0 0 1-3.9 1l-2.1-1.7H9.3l-2.1 1.7a2.4 2.4 0 0 1-3.9-1L2.6 14a4 4 0 0 1 3.8-5z"/><path d="M7 11.5v4M5 13.5h4M16 12h.01M18 14h.01"/>'
   };
   const PICKABLE = ['camera', 'video', 'package', 'orb', 'toolbox', 'phone', 'monitor', 'code', 'chat', 'bolt', 'globe'];
   const svg = (k) => `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[k] || ''}</svg>`;
@@ -90,12 +100,15 @@
   }
 
   /* ---------- data ---------- */
-  const EXTRA = { city: '', exe: '', scripts: '', autoexec: '', rpcMode: 'release', rpcDev: '', rpcRelease: '', discordUser: null, beacons: { youtube: false, twitch: false } };
+  const DEFAULT_CUSTOM_THEME = { background: '#101114', accent: '#ff5264', surface: '#1b1d22' };
+  const EXTRA = { city: '', exe: '', scripts: '', autoexec: '', executorProfiles: [], activeExecutorProfile: '', customTheme: { ...DEFAULT_CUSTOM_THEME }, discordUser: null, beacons: { youtube: false, twitch: false } };
+  const validHex = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value.toUpperCase() : fallback;
   let appMode = 'release';
   const canEditProjects = () => appMode === 'dev';
-  const gateProjectEditor = (msg = 'This feature is available in developer mode only.') => {
-    if (canEditProjects()) return true;
-    toast(msg, 'err');
+  const canEditProject = (p) => canEditProjects() || !p || !p.isStarter;
+  const gateProjectEditor = (msg = 'This feature is available in developer mode only.', p = null) => {
+    if (canEditProject(p)) return true;
+    toast(msg || 'This starter template is locked to developer mode.', 'err');
     return false;
   };
 
@@ -110,16 +123,11 @@
       version: 2,
       settings: { name: '', hubName: 'YuniHub', theme: 'dark', sort: 'manual', closeToTray: false, hotkey: false, compactMode: false, reduceMotion: false, welcomeSeen: false, welcomeVersion: 0, ...EXTRA, beacons: { ...EXTRA.beacons }, discordUser: null },
       projects: [
-        mkProject('Instagram Client', 'Your own Android client for browsing Instagram.', 'Android', 'camera',
-          ['Add it to the hub', 'Pick the app architecture', 'Sign-in and session storage', 'Home feed screen', 'Profile screen', 'Photo and video viewer', 'Direct messages', 'Settings and theming']),
-        mkProject('YouTube Client', 'A ReVanced-style YouTube app with the extras built in.', 'Android', 'video',
-          ['Add it to the hub', 'Pick the player library', 'Search and results', 'Video playback screen', 'Subscriptions feed', 'Background playback', 'Downloads', 'Settings']),
-        mkProject('APK Installer', 'Open an APK, check it, and install it in a few taps.', 'Android', 'package',
-          ['Add it to the hub', 'Read app name, version and icon', 'Install through the system installer', 'Install progress screen', 'Split APK and bundle support', 'Installed apps list', 'Update and uninstall']),
-        mkProject('Discord Orb Completer', 'A desktop helper for Discord orbs.', 'PC', 'orb',
-          ['Add it to the hub', 'Write down what it should do', 'Sketch the window layout', 'Settings storage', 'First working version']),
-        mkProject('PC Toolbox', 'A home for the smaller desktop utilities to come.', 'PC', 'toolbox',
-          ['Add it to the hub', 'List the first three tools', 'Pick a shared look', 'Package it as an installer'])
+        { ...mkProject('Instagram Client', 'Your own Android client for browsing Instagram.', 'Android', 'camera', ['Add it to the hub', 'Pick the app architecture', 'Sign-in and session storage', 'Home feed screen', 'Profile screen', 'Photo and video viewer', 'Direct messages', 'Settings and theming']), pinned: true, status: 'Building', isStarter: true },
+        { ...mkProject('YouTube Client', 'A ReVanced-style YouTube app with the extras built in.', 'Android', 'video', ['Add it to the hub', 'Pick the player library', 'Search and results', 'Video playback screen', 'Subscriptions feed', 'Background playback', 'Downloads', 'Settings']), pinned: true, status: 'Building', isStarter: true },
+        { ...mkProject('APK Installer', 'Open an APK, check it, and install it in a few taps.', 'Android', 'package', ['Add it to the hub', 'Read app name, version and icon', 'Install through the system installer', 'Install progress screen', 'Split APK and bundle support', 'Installed apps list', 'Update and uninstall']), pinned: true, status: 'Idea', isStarter: true },
+        { ...mkProject('Discord Orb Completer', 'A desktop helper for Discord orbs.', 'PC', 'orb', ['Add it to the hub', 'Write down what it should do', 'Sketch the window layout', 'Settings storage', 'First working version']), pinned: false, status: 'Idea', isStarter: true },
+        { ...mkProject('PC Toolbox', 'A home for the smaller desktop utilities to come.', 'PC', 'toolbox', ['Add it to the hub', 'List the first three tools', 'Pick a shared look', 'Package it as an installer']), pinned: false, status: 'Idea', isStarter: true }
       ]
     };
   }
@@ -141,6 +149,7 @@
       icon: PICKABLE.includes(o.icon) ? o.icon : 'package',
       status: STATUSES.includes(o.status) ? o.status : 'Idea',
       pinned: !!o.pinned,
+      isStarter: !!o.isStarter,
       tasks, links,
       notes: String(o.notes == null ? '' : o.notes).slice(0, 20000),
       folder: clip(o.folder, 500),
@@ -157,13 +166,24 @@
       version: 2,
       settings: {
         name: clip(s.name, 40), hubName: clip(s.hubName, 30) || 'YuniHub',
-        theme: s.theme === 'rei' ? 'rei' : 'dark',
+        theme: ['dark', 'rei', 'custom'].includes(s.theme) ? s.theme : 'dark',
+        customTheme: {
+          background: validHex(s.customTheme && s.customTheme.background, DEFAULT_CUSTOM_THEME.background),
+          accent: validHex(s.customTheme && s.customTheme.accent, DEFAULT_CUSTOM_THEME.accent),
+          surface: validHex(s.customTheme && s.customTheme.surface, DEFAULT_CUSTOM_THEME.surface)
+        },
         sort: SORTS.some((x) => x[0] === s.sort) ? s.sort : 'manual',
         closeToTray: !!s.closeToTray, hotkey: !!s.hotkey, welcomeSeen: !!s.welcomeSeen,
         compactMode: !!s.compactMode, reduceMotion: !!s.reduceMotion,
         welcomeVersion: s.welcomeVersion === 1 ? 1 : 0,
         city: clip(s.city, 80), exe: clip(s.exe, 500), scripts: clip(s.scripts, 500), autoexec: clip(s.autoexec, 500),
-        rpcMode: s.rpcMode === 'dev' ? 'dev' : 'release', rpcDev: clip(s.rpcDev, 30), rpcRelease: clip(s.rpcRelease, 30),
+        executorProfiles: (Array.isArray(s.executorProfiles) ? s.executorProfiles : []).slice(0, 20).map((profile) => ({
+          id: clip(profile && profile.id, 40) || uid(),
+          name: clip(profile && profile.name, 50) || 'Executor profile',
+          executorPath: clip(profile && profile.executorPath, 500),
+          autoexecFolder: clip(profile && profile.autoexecFolder, 500)
+        })),
+        activeExecutorProfile: clip(s.activeExecutorProfile, 40),
         discordUser: s.discordUser && typeof s.discordUser === 'object' ? {
           id: clip(s.discordUser.id, 40), username: clip(s.discordUser.username, 40), global_name: clip(s.discordUser.global_name, 80), avatar: s.discordUser.avatar || null
         } : null,
@@ -174,12 +194,94 @@
     };
   }
 
+  function activeExecutorProfile() {
+    return S.settings.executorProfiles.find((profile) => profile.id === S.settings.activeExecutorProfile) || null;
+  }
+
+  function syncActiveExecutorProfile() {
+    const profile = activeExecutorProfile();
+    if (!profile) return;
+    profile.executorPath = S.settings.exe;
+    profile.autoexecFolder = S.settings.autoexec;
+  }
+
+  function saveExecutorProfile() {
+    const name = clip(document.getElementById('s-profile-name')?.value, 50);
+    if (!name) { toast('Enter a name for this executor profile.', 'err'); return; }
+    let profile = activeExecutorProfile();
+    if (!profile) {
+      profile = { id: uid(), name, executorPath: S.settings.exe, autoexecFolder: S.settings.autoexec };
+      S.settings.executorProfiles.push(profile);
+      S.settings.activeExecutorProfile = profile.id;
+    } else {
+      profile.name = name;
+      profile.executorPath = S.settings.exe;
+      profile.autoexecFolder = S.settings.autoexec;
+    }
+    touch(); render(); toast('Executor profile saved.', 'ok');
+  }
+
+  function createExecutorProfile() {
+    if (S.settings.executorProfiles.length >= 20) { toast('You can save up to 20 executor profiles.', 'err'); return; }
+    const profile = { id: uid(), name: `Executor ${S.settings.executorProfiles.length + 1}`, executorPath: '', autoexecFolder: '' };
+    S.settings.executorProfiles.push(profile);
+    S.settings.activeExecutorProfile = profile.id;
+    S.settings.exe = '';
+    S.settings.autoexec = '';
+    selectedScripts.clear();
+    touch(); render();
+    const nameField = document.getElementById('s-profile-name');
+    if (nameField) { nameField.focus(); nameField.select(); }
+  }
+
+  async function switchExecutorProfile(id) {
+    if (!id) {
+      S.settings.activeExecutorProfile = '';
+      touch(); render();
+      return;
+    }
+    const profile = S.settings.executorProfiles.find((item) => item.id === id);
+    if (!profile) return;
+    S.settings.activeExecutorProfile = profile.id;
+    S.settings.exe = profile.executorPath;
+    S.settings.autoexec = profile.autoexecFolder;
+    selectedScripts.clear();
+    watchedScriptsPath = null;
+    touch();
+    await refreshScripts();
+    render();
+  }
+
+  function deleteExecutorProfile() {
+    const profile = activeExecutorProfile();
+    if (!profile) return;
+    S.settings.executorProfiles = S.settings.executorProfiles.filter((item) => item.id !== profile.id);
+    S.settings.activeExecutorProfile = S.settings.executorProfiles[0]?.id || '';
+    const next = activeExecutorProfile();
+    S.settings.exe = next ? next.executorPath : '';
+    S.settings.autoexec = next ? next.autoexecFolder : '';
+    selectedScripts.clear();
+    watchedScriptsPath = null;
+    touch(); render();
+  }
+
   /* ---------- state ---------- */
   let S = defaults();
   let info = { version: '', platform: '', dataFile: '', backupDir: '', openAtLogin: false };
-  const ui = { view: 'home', id: null, modal: false, confirmDel: false, q: '', editTask: null, welcomeStep: 0 };
+  let updateInfo = { status: 'idle', version: '', percent: 0, message: 'Checking for updates...' };
+  const ui = { view: 'home', id: null, modal: false, confirmDel: false, q: '', editTask: null, welcomeStep: 0, scriptDetails: null, scriptConflicts: null };
   const drafts = {};
   const pal = { open: false, q: '', sel: 0 };
+  const selectedScripts = new Map();
+  let scriptCatalog = { scripts: [], userFolderValid: true, bundle: { version: '', changes: [], updateAvailable: false } };
+  let scriptSearch = () => [];
+  let scriptEditor = null;
+  let watchedScriptsPath = null;
+  let installedScripts = [];
+  let scriptQuery = '';
+  let gameFilter = '';
+  let executorFilter = '';
+  let searchUpdateFrame = 0;
   let rpcUser = null;
   let weather = 'Syncing...';
   let saveTimer = null;
@@ -207,10 +309,60 @@
   window.addEventListener('pagehide', flush);
 
   function applyTheme() {
-    document.documentElement.setAttribute('data-theme', S.settings.theme);
-    document.documentElement.setAttribute('data-density', S.settings.compactMode ? 'compact' : 'comfortable');
-    document.documentElement.setAttribute('data-motion', S.settings.reduceMotion ? 'reduced' : 'full');
-    API.setTheme(S.settings.theme);
+    const root = document.documentElement;
+    const theme = S.settings.theme;
+    root.setAttribute('data-theme', theme);
+    root.setAttribute('data-density', S.settings.compactMode ? 'compact' : 'comfortable');
+    root.setAttribute('data-motion', S.settings.reduceMotion ? 'reduced' : 'full');
+    const customProperties = ['--bg', '--glow1', '--glow2', '--glass', '--glass-2', '--glass-3', '--line', '--line-2', '--text', '--muted', '--faint', '--a1', '--a2', '--btn', '--btn-text', '--btn-shadow', '--eye', '--shadow', '--input', '--modal', '--scroll', '--edge'];
+    if (theme === 'custom') {
+      const palette = S.settings.customTheme;
+      const rgb = (color) => color.match(/[\da-f]{2}/gi).map((part) => parseInt(part, 16));
+      const rgba = (color, alpha) => `rgba(${rgb(color).join(',')},${alpha})`;
+      const luminance = (color) => {
+        const [red, green, blue] = rgb(color).map((part) => part / 255);
+        return .2126 * red + .7152 * green + .0722 * blue;
+      };
+      const shade = (color, factor) => `#${rgb(color).map((part) => Math.round(part * factor).toString(16).padStart(2, '0')).join('')}`;
+      const light = luminance(palette.background) > .56;
+      const lightAccent = luminance(palette.accent) > .62;
+      root.style.colorScheme = light ? 'light' : 'dark';
+      const values = {
+        '--bg': palette.background,
+        '--glow1': rgba(palette.accent, .16),
+        '--glow2': rgba(palette.accent, .07),
+        '--glass': rgba(palette.surface, light ? .72 : .46),
+        '--glass-2': rgba(palette.surface, light ? .84 : .68),
+        '--glass-3': rgba(palette.surface, light ? .94 : .86),
+        '--line': light ? rgba(palette.accent, .14) : 'rgba(255,255,255,.09)',
+        '--line-2': rgba(palette.accent, .42),
+        '--text': light ? '#21171A' : '#F6F1F2',
+        '--muted': light ? '#654C52' : '#B7A6A9',
+        '--faint': light ? '#886B71' : '#8E7076',
+        '--a1': palette.accent,
+        '--a2': shade(palette.accent, .72),
+        '--btn': `linear-gradient(135deg, ${palette.accent}, ${shade(palette.accent, .72)})`,
+        '--btn-text': lightAccent ? '#21171A' : '#FFFFFF',
+        '--btn-shadow': rgba(palette.accent, .30),
+        '--eye': palette.accent,
+        '--shadow': light ? '0 16px 44px rgba(45,15,22,.16)' : '0 18px 50px rgba(0,0,0,.48)',
+        '--input': rgba(palette.surface, light ? .92 : .58),
+        '--modal': palette.surface,
+        '--scroll': rgba(palette.accent, .28),
+        '--edge': rgba(palette.accent, .45)
+      };
+      for (const [property, value] of Object.entries(values)) root.style.setProperty(property, value);
+      API.setTheme(theme, palette.background);
+      root.querySelectorAll('.swatch.s-custom').forEach((swatch) => {
+        swatch.style.setProperty('--custom-bg', palette.background);
+        swatch.style.setProperty('--custom-surface', palette.surface);
+        swatch.style.setProperty('--custom-accent', palette.accent);
+      });
+    } else {
+      root.style.removeProperty('color-scheme');
+      for (const property of customProperties) root.style.removeProperty(property);
+      API.setTheme(theme);
+    }
   }
 
   /* ---------- toast (with optional action, used for undo) ---------- */
@@ -276,30 +428,164 @@
       .map((x) => x.p);
   }
 
-  /* ---------- tools (Spotify, Roblox, Discord Status) ---------- */
+  /* ---------- tools ---------- */
   const TOOLS = [
     { id: 'yunispot', cat: 'Spotify', icon: 'headphones', name: 'YuniSpot', soon: true, label: 'Install', desc: 'Custom Spotify client with theming, ad-block, and extra playback features. Installs and patches Spotify automatically.' },
-    { id: 'autoload', cat: 'Roblox', icon: 'toolbox', name: 'Auto-Load Yuniku Made Scripts', label: 'Launch', desc: 'Lets you auto-load any Yuniku made scripts into your executor with a single click.' },
+    { id: 'autoload', cat: 'Roblox', icon: 'toolbox', name: 'Script Library', label: 'Open library', desc: 'Browse bundled Yuniku scripts and your own library. Choose exactly what to copy into your executor.' },
     { id: 'executor', cat: 'Roblox', icon: 'bolt', name: 'Executor Launcher', label: 'Launch', desc: 'Quick-launch your executor directly from the hub.' },
+    { id: 'ps4-package-sender', cat: 'PS4', icon: 'gamepad', name: 'PS4 Remote Package Sender', soon: true, desc: 'A planned FTP-based package transfer utility for sending packages to a configured PS4.' },
+    { id: 'yunisave', cat: 'PS4', icon: 'toolbox', name: 'YuniSave', soon: true, desc: 'A planned PS4 save-management and editing workspace.' },
     { id: 'youtube', cat: 'Discord', icon: 'video', name: 'YouTube Beacon', toggle: true, desc: 'Requires Tampermonkey + the Yuniku Hub userscript installed in your browser. Then this updates your Discord Rich Presence while watching YouTube.' },
     { id: 'twitch', cat: 'Discord', icon: 'chat', name: 'Twitch Beacon', toggle: true, desc: 'Requires Tampermonkey + the Yuniku Hub userscript installed in your browser. Then this updates your Discord Rich Presence while watching or streaming on Twitch.' }
   ];
 
   function toolCard(t) {
     const on = t.toggle && S.settings.beacons[t.id];
-    const label = t.toggle ? (on ? 'Disable' : 'Enable') : t.label;
+    const label = t.soon ? 'Coming soon' : t.toggle ? (on ? 'Disable' : 'Enable') : t.label;
     return `<article class="card"><div class="card-top"><div class="tile">${svg(t.icon)}</div>
       <div class="card-head"><h3>${esc(t.name)}</h3><span class="pill ${t.soon ? 'st-Idea' : 'st-Shipped'}">${t.soon ? 'coming soon' : on ? 'on' : 'available'}</span></div></div>
       <p class="desc">${esc(t.desc)}</p>
-      <div class="actions"><button class="btn${t.soon ? '' : ' primary'}" data-act="tool" data-id="${t.id}" data-k="tool-${t.id}">${label}</button></div></article>`;
+      <div class="actions"><button class="btn${t.soon ? '' : ' primary'}" data-act="tool" data-id="${t.id}" data-k="tool-${t.id}"${t.soon ? ' disabled' : ''}>${label}</button></div></article>`;
   }
   const toolGrid = (cat) => `<div class="grid tools-grid">${TOOLS.filter((t) => !cat || t.cat === cat).map(toolCard).join('')}</div>`;
+
+  function filteredScripts() {
+    return scriptSearch(scriptQuery, gameFilter, executorFilter);
+  }
+
+  function scriptRowsMarkup(items, source, empty) {
+    if (!items.length) return `<p class="help script-empty">${empty}</p>`;
+    return items.map((script, index) => {
+      const key = `${script.source}:${script.name}`;
+      const detailsKey = `${source}-${index}`;
+      return `<div class="script-row">
+        <input class="chk script-check" type="checkbox" aria-label="Select ${esc(script.title)}" data-source="${script.source}" data-name="${esc(script.name)}" data-k="script-${source}-${index}"${selectedScripts.has(key) ? ' checked' : ''}>
+        <span class="script-mark">${svg('code')}</span>
+        <span class="script-copy"><button class="script-title" data-act="script-details" data-source="${script.source}" data-name="${esc(script.name)}" data-k="detail-${detailsKey}">${esc(script.title)}</button><small>${esc(script.name)} &middot; v${esc(script.version)} &middot; ${esc(script.author)}</small></span>
+        <span class="pill ${script.supportsAutoload ? 'st-Shipped' : 'st-Idea'}">${script.supportsAutoload ? 'autoload ready' : 'manual load'}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function scriptGroupsMarkup(filtered) {
+    const builtins = filtered.filter((script) => script.source === 'builtin');
+    const users = filtered.filter((script) => script.source === 'user');
+    return { builtins, users, html: `<section class="script-group"><h4>Yuniku scripts <span>${builtins.length}</span></h4>${scriptRowsMarkup(builtins, 'builtin', 'No bundled Yuniku scripts match these filters.')}</section>
+      <section class="script-group"><h4>Your scripts <span>${users.length}</span></h4>
+        ${!scriptCatalog.userFolderValid ? '<p class="help script-error">The selected user scripts folder could not be found. Choose another folder in Settings.</p>' : scriptRowsMarkup(users, 'user', S.settings.scripts ? 'No user scripts match these filters.' : 'Choose a user scripts folder in Settings to scan your scripts.')}
+      </section>` };
+  }
+
+  function updateScriptResults() {
+    const groups = document.getElementById('script-groups');
+    if (!groups) return;
+    const filtered = filteredScripts();
+    groups.innerHTML = scriptGroupsMarkup(filtered).html;
+    const count = document.getElementById('script-result-count');
+    if (count) count.textContent = `${filtered.length} of ${scriptCatalog.scripts.length}`;
+  }
+
+  function scriptLibraryMarkup() {
+    const filtered = filteredScripts();
+    const groups = scriptGroupsMarkup(filtered);
+    const selected = Array.from(selectedScripts.values());
+    const canAutoload = selected.length > 0 && selected.every((script) => script.supportsAutoload);
+    const games = Array.from(new Set(scriptCatalog.scripts.flatMap((script) => script.games))).sort();
+    const executors = Array.from(new Set(scriptCatalog.scripts.flatMap((script) => script.supportedExecutors))).sort();
+    const bundle = scriptCatalog.bundle || {};
+    return `<section class="panel script-library" id="script-library">
+      <div class="script-head"><div><span class="label">ROBLOX TOOLS</span><h3>Script library <small id="script-result-count">${filtered.length} of ${scriptCatalog.scripts.length}</small></h3></div>
+        <button class="icon-btn" data-act="script-refresh" data-k="script-refresh" aria-label="Refresh script library" title="Refresh script library">${svg('arrow')}</button></div>
+      ${bundle.updateAvailable ? `<div class="bundle-notice"><div><b>Yuniku scripts updated to v${esc(bundle.version)}</b><ul>${(bundle.changes || []).map((change) => `<li>${esc(change)}</li>`).join('')}</ul></div><button class="btn" data-act="script-bundle-ack" data-v="${esc(bundle.version)}" data-k="bundle-ack">Got it</button></div>` : ''}
+      <div class="script-filters"><label class="search">${svg('search')}<input id="script-search" class="in" placeholder="Search name, game, tag, executor" value="${esc(scriptQuery)}" autocomplete="off"></label>
+        <select id="script-game-filter" class="in sel" aria-label="Filter by game"><option value="">All games</option>${games.map((game) => `<option value="${esc(game)}"${gameFilter === game ? ' selected' : ''}>${esc(game)}</option>`).join('')}</select>
+        <select id="script-executor-filter" class="in sel" aria-label="Filter by executor"><option value="">All executors</option>${executors.map((executor) => `<option value="${esc(executor)}"${executorFilter === executor ? ' selected' : ''}>${esc(executor)}</option>`).join('')}</select>
+      </div>
+      <div class="script-groups" id="script-groups">${groups.html}</div>
+      <div class="script-actions"><span class="help">${selected.length} selected</span>
+        <div class="actions"><button class="btn" data-act="script-copy" data-mode="executor" data-k="script-copy"${selected.length ? '' : ' disabled'}>Copy to executor</button>
+          <button class="btn primary" data-act="script-copy" data-mode="autoload" data-k="script-autoload"${canAutoload && S.settings.autoexec ? '' : ' disabled'}>Add to autoload</button></div>
+      </div>
+      ${!S.settings.autoexec ? '<p class="help">Set an executor autoload folder in Settings. Only supported scripts can be added.</p>' : ''}
+      <section class="installed-scripts"><div class="installed-head"><h4>Installed scripts <span>${installedScripts.length}</span></h4><button class="textbtn" data-act="script-backups" data-k="script-backups">Open backups</button></div>
+        ${installedScripts.length ? installedScripts.map((script, index) => `<div class="installed-row"><div><b>${esc(script.name)}</b><small>${script.action === 'autoload' ? 'Autoload' : 'Executor'} &middot; ${esc(script.destination)}</small></div><button class="btn danger" data-act="script-remove" data-name="${esc(script.name)}" data-destination="${esc(script.destination)}" data-k="remove-script-${index}">Remove</button></div>`).join('') : '<p class="help">YuniHub-managed copies will appear here.</p>'}
+      </section>
+    </section>`;
+  }
+
+  function scriptDetailsModal() {
+    const detail = ui.scriptDetails;
+    if (!detail) return '';
+    const script = detail.script;
+    const item = (label, values) => values && values.length ? `<div class="script-detail"><span class="label">${label}</span><span>${values.map(esc).join(', ')}</span></div>` : '';
+    return `<div class="scrim script-preview-scrim" data-act="script-preview-scrim"><section class="script-preview modal" role="dialog" aria-modal="true" aria-labelledby="script-preview-title">
+      <div class="script-preview-head"><div><span class="label">${script.source === 'builtin' ? 'YUNIKU SCRIPT' : 'USER SCRIPT'}</span><h2 id="script-preview-title">${esc(script.title)}</h2><p class="help">${esc(script.description || 'No description provided.')}</p></div><button class="icon-btn" data-act="script-details-close" data-k="script-details-close" aria-label="Close script preview" title="Close">${svg('x')}</button></div>
+      <div class="script-details-grid"><div class="script-detail"><span class="label">Version</span><span>${esc(script.version)}</span></div><div class="script-detail"><span class="label">Author</span><span>${esc(script.author)}</span></div><div class="script-detail"><span class="label">Autoload</span><span>${script.supportsAutoload ? 'Supported' : 'Not declared'}</span></div>${item('Games', script.games)}${item('Executors', script.supportedExecutors)}${item('Tags', script.tags)}</div>
+      <div class="script-source-head"><span class="label">Source preview · read only</span><span class="mono">${esc(script.name)}</span></div><div class="script-editor" id="script-editor" aria-label="Read-only script source"></div>
+      <div class="actions"><button class="btn" data-act="script-details-close" data-k="script-details-close">Close</button></div>
+    </section></div>`;
+  }
+
+  async function mountScriptEditor(mount, detail) {
+    const { createScriptEditor } = await import('./script-preview.js');
+    if (mount.isConnected && ui.scriptDetails === detail) scriptEditor = createScriptEditor(mount, detail);
+  }
+
+  function scriptConflictModal() {
+    if (!ui.scriptConflicts) return '';
+    return `<div class="scrim"><section class="modal script-conflict" role="dialog" aria-modal="true" aria-labelledby="script-conflict-title">
+      <span class="label">FILE CONFLICT</span><h2 id="script-conflict-title">These filenames already exist</h2>
+      <p class="help">YuniHub will back up each existing file before replacing it. No files will be overwritten unless you confirm.</p>
+      <ul class="script-conflict-list">${ui.scriptConflicts.conflicts.map((name) => `<li>${esc(name)}</li>`).join('')}</ul>
+      <div class="actions"><button class="btn" data-act="script-conflict-cancel" data-k="script-conflict-cancel">Keep existing files</button>
+        <button class="btn primary" data-act="script-conflict-replace" data-k="script-conflict-replace">Back up and replace</button></div>
+    </section></div>`;
+  }
+
+  async function openScriptDetails(selection) {
+    const result = await API.readScript(selection, S.settings.scripts);
+    if (!result || !result.ok) { toast((result && result.error) || 'Could not read this script.', 'err'); return; }
+    ui.scriptDetails = result;
+    render();
+  }
+
+  async function refreshScripts(notify = false) {
+    if (!API.listScripts) return;
+    const result = await API.listScripts(S.settings.scripts);
+    if (!result || !result.ok) {
+      if (notify) toast((result && result.error) || 'Could not scan script folders.', 'err');
+      return;
+    }
+    scriptCatalog = { scripts: result.scripts || [], userFolderValid: result.userFolderValid !== false, bundle: result.bundle || {} };
+    scriptSearch = createScriptSearch(scriptCatalog.scripts);
+    const available = new Map(scriptCatalog.scripts.map((script) => [`${script.source}:${script.name}`, script]));
+    for (const [key, selected] of selectedScripts) {
+      const current = available.get(key);
+      if (!current) selectedScripts.delete(key);
+      else selectedScripts.set(key, { ...selected, supportsAutoload: current.supportsAutoload });
+    }
+    if (API.listManagedScripts) {
+      const managed = await API.listManagedScripts();
+      installedScripts = managed && managed.ok ? managed.scripts || [] : [];
+    }
+    if (watchedScriptsPath !== S.settings.scripts && API.watchScripts) {
+      watchedScriptsPath = S.settings.scripts;
+      const watcher = await API.watchScripts(S.settings.scripts);
+      if (!watcher || !watcher.ok) {
+        watchedScriptsPath = null;
+        if (notify) toast('Could not watch this script folder. Manual refresh is still available.', 'err');
+      }
+    }
+    if (ui.view === 'Roblox') render();
+    if (notify) toast(`Found ${scriptCatalog.scripts.length} script${scriptCatalog.scripts.length === 1 ? '' : 's'}.`, 'ok');
+  }
 
   function viewTools(cat) {
     const extra = cat === 'Discord' ? `<section class="panel" style="margin-top:16px"><h3>Browser userscript</h3>
       <p class="help">Install Tampermonkey, then add this script. It sends the current video title to the hub on this PC only (127.0.0.1), and the hub shows it on Discord. Link Discord in the sidebar first.</p>
       <div class="actions"><button class="btn" data-act="ut" data-k="ut">Export userscript</button></div></section>` : '';
-    return `<div class="sec-head"><h2>${cat === 'Discord' ? 'Discord Status' : cat}</h2></div>${toolGrid(cat)}${extra}`;
+    const scripts = cat === 'Roblox' ? scriptLibraryMarkup() : '';
+    return `<div class="sec-head"><h2>${cat === 'Discord' ? 'Discord Status' : cat}</h2></div>${toolGrid(cat)}${scripts}${extra}`;
   }
 
   function discordAvatarUrl(user) {
@@ -309,12 +595,12 @@
   }
 
   function discordApplicationId() {
-    return appMode === 'dev' ? S.settings.rpcDev : S.settings.rpcRelease;
+    return '';
   }
 
   function welcomeMarkup() {
     const step = Math.max(0, Math.min(2, ui.welcomeStep));
-    const hasDiscordApp = !!discordApplicationId();
+    const hasDiscordApp = !!(S.settings.discordUser || rpcUser || S.settings.discordSession);
     const content = [
       {
         label: 'A HOME FOR WHAT YOU BUILD',
@@ -366,44 +652,35 @@
   function intPanel() {
     const s = S.settings;
     const detectedCity = s.city || info.weatherCity || 'Detecting your weather city...';
-    const discordUser = s.discordUser || rpcUser;
+    const profile = activeExecutorProfile();
     const f = (label, key, ph, kind) => `<div class="field"><label class="label" for="s-${key}">${label}</label><div class="row nowrap">
       <input class="in" id="s-${key}" data-set="${key}" value="${esc(s[key])}" placeholder="${ph}" spellcheck="false">
       ${kind ? `<button class="btn" data-act="setpick" data-f="${key}" data-v="${kind}" data-k="pk-${key}">Browse</button>` : ''}</div></div>`;
-    return `<section class="panel"><h3>Integrations</h3>
+    return `<section class="panel"><h3>Desktop setup</h3>
       <div class="field"><label class="label">Detected weather city</label>
         <input class="in" value="${esc(detectedCity)}" readonly aria-readonly="true"></div>
+      <div class="field"><label class="label" for="s-profile-select">Executor profile</label>
+        <div class="row nowrap"><select class="in sel" id="s-profile-select" aria-label="Active executor profile"><option value="">Current paths (unsaved)</option>${s.executorProfiles.map((item) => `<option value="${esc(item.id)}"${item.id === s.activeExecutorProfile ? ' selected' : ''}>${esc(item.name)}</option>`).join('')}</select>
+          <button class="btn" data-act="profile-new" data-k="profile-new">New</button></div>
+        <div class="row nowrap"><input class="in" id="s-profile-name" value="${esc(profile ? profile.name : '')}" placeholder="Profile name" maxlength="50" aria-label="Executor profile name">
+          <button class="btn" data-act="profile-save" data-k="profile-save">Save</button>
+          <button class="icon-btn" data-act="profile-delete" data-k="profile-delete" aria-label="Delete active profile" title="Delete active profile"${profile ? '' : ' disabled'}>${svg('trash')}</button></div>
+      </div>
       ${f('Executor', 'exe', 'Path to your executor .exe', 'file')}
-      ${f('Scripts folder', 'scripts', 'Folder with your Yuniku scripts', 'folder')}
-      ${f('Executor autoexec folder', 'autoexec', 'Where your executor auto-runs scripts', 'folder')}
-      ${f('Discord app ID (release)', 'rpcRelease', 'Application ID')}
-      ${f('Discord app ID (dev)', 'rpcDev', 'Application ID')}
-      <div class="field">
-        <label class="label">Discord account perks</label>
-        <div class="help">${discordUser ? `Linked as ${esc(discordUser.global_name || discordUser.username || 'Discord user')}. Unlocks live profile sync, better support, and future YuniHub beta perks.` : 'Link your Discord account to unlock live profile sync, future beta access, uptime and status checks, and a cleaner YuniHub identity.'}</div>
-      </div></section>`;
+      ${f('Your scripts folder', 'scripts', 'Folder containing your own Lua scripts', 'folder')}
+      ${f('Executor autoload folder', 'autoexec', 'Optional folder used by your executor for autoload scripts', 'folder')}
+      <p class="help">Yuniku scripts ship inside YuniHub. Your folder is scanned separately; choose only the scripts you want to copy.</p>
+      </section>`;
   }
 
   async function connectRpc() {
-    const s = S.settings;
-    if (API.discordAuth) {
-      const auth = await API.discordAuth();
-      if (auth && auth.ok) {
-        toast('Discord sign-in opened in your browser. Finish the browser flow and then return here.', 'ok');
-      } else if (auth && auth.error) {
-        toast(auth.error, 'err');
-      }
+    if (!API.discordAuth) return;
+    const auth = await API.discordAuth();
+    if (auth && auth.ok) {
+      toast('Discord sign-in opened in your browser. Finish the browser flow and then return here.', 'ok');
+    } else if (auth && auth.error) {
+      toast(auth.error, 'err');
     }
-    const id = discordApplicationId();
-    if (!id) {
-      render();
-      return;
-    }
-    const r = await API.rpcConnect(id);
-    rpcUser = r && r.ok ? r.user : null;
-    render();
-    if (!r || !r.ok) toast((r && r.error) || 'Could not link Discord.', 'err');
-    else updateDiscordActivity();
   }
 
   async function refreshDiscordProfile() {
@@ -449,6 +726,11 @@
   async function runTool(id) {
     const s = S.settings;
     if (id === 'yunispot') { toast('YuniSpot is coming soon.'); return; }
+    if (id === 'autoload') {
+      go('Roblox');
+      requestAnimationFrame(() => document.getElementById('script-library')?.scrollIntoView({ behavior: S.settings.reduceMotion ? 'auto' : 'smooth', block: 'start' }));
+      return;
+    }
     if (id === 'youtube' || id === 'twitch') {
       s.beacons[id] = !s.beacons[id]; touch();
       await API.setBeacons(s.beacons); render();
@@ -461,17 +743,13 @@
       if (r && r.ok) toast('Launched your executor.', 'ok'); else toast((r && r.error) || 'Could not launch.', 'err');
       return;
     }
-    const r = await API.autoload(s.scripts, s.autoexec);
-    if (r && r.ok) toast(`Loaded ${r.count} script${r.count === 1 ? '' : 's'} into your executor.`, 'ok');
-    else toast((r && r.error) || 'Could not load scripts.', 'err');
   }
 
   function sidebar() {
-    const o = overall();
     const cnt = (tr) => S.projects.filter((p) => p.track === tr).length;
     const cur = ui.view === 'project' && find(ui.id) ? find(ui.id).track : ui.view;
     const item = (v, label, icon, count) =>
-      `<button class="nav-item${cur === v ? ' on' : ''}" data-act="nav" data-v="${v}" data-k="nav-${v}">
+      `<button class="nav-item${cur === v ? ' on' : ''}" data-act="nav" data-v="${v}" data-k="nav-${v}" aria-label="${label}" title="${label}" aria-current="${cur === v ? 'page' : 'false'}">
         <span class="nav-ic">${svg(icon)}</span><span>${label}</span>${count != null ? `<em>${count}</em>` : ''}</button>`;
     const recent = S.projects.filter((p) => p.opened).sort((a, b) => b.opened - a.opened).slice(0, 3);
     const linkedUser = S.settings.discordUser || rpcUser;
@@ -483,13 +761,18 @@
       </div>
       <button class="searchbtn" data-act="palette" data-k="palette">${svg('search')}<span>Search</span><kbd>Ctrl K</kbd></button>
       <nav class="nav" aria-label="Main">
-        ${item('home', 'Home', 'home', S.projects.length)}
-        ${item('Spotify', 'Spotify', 'headphones')}
-        ${item('Roblox', 'Roblox', 'package')}
-        ${item('Discord', 'Discord Status', 'chat')}
-        ${item('Android', 'Android', 'phone', cnt('Android'))}
-        ${item('PC', 'PC', 'monitor', cnt('PC'))}
-        ${item('settings', 'Settings', 'sliders', null)}
+        <div class="nav-group"><span class="nav-label">Workspace</span>
+          ${item('home', 'Home', 'home', S.projects.length)}
+          ${item('Android', 'Android', 'phone', cnt('Android'))}
+          ${item('PC', 'PC', 'monitor', cnt('PC'))}
+        </div>
+        <div class="nav-group"><span class="nav-label">Tools</span>
+          ${item('Spotify', 'Spotify', 'headphones')}
+          ${item('Roblox', 'Roblox', 'package')}
+          ${item('PS4', 'PS4', 'gamepad')}
+          ${item('Discord', 'Discord Status', 'chat')}
+        </div>
+        <div class="nav-group nav-group-settings">${item('settings', 'Settings', 'sliders', null)}</div>
       </nav>
       ${recent.length ? `<div class="recent"><span class="label">Recent</span>${recent.map((p) =>
         `<button class="rec${ui.view === 'project' && ui.id === p.id ? ' on' : ''}" data-act="open" data-id="${p.id}" data-k="rc-${p.id}">${svg(p.icon)}<span>${esc(p.name)}</span></button>`).join('')}</div>` : ''}
@@ -503,9 +786,9 @@
             </div>
             <button class="btn danger" data-act="rpcout" data-k="rpcout">Disconnect</button>`
           : `<button class="btn primary" data-act="rpclink" data-k="rpclink">Connect Discord</button>`}
-        <div class="help" style="margin-top:10px; line-height:1.5;">${linkedUser ? 'Unlocked: profile sync, status checks, and future YuniHub beta rewards.' : 'Link your Discord to unlock perks beyond RPC, like account-based features and beta access.'}</div>
+        <div class="help" style="margin-top:10px; line-height:1.5;">${linkedUser ? 'Unlocked: profile sync, status checks, and a cleaner YuniHub identity.' : 'Link your Discord to unlock account perks and a more complete YuniHub identity.'}</div>
         <span class="label">Discord presence</span>
-        <div class="help">Using the ${appMode === 'dev' ? 'developer' : 'release'} Discord application for this build.</div>
+        <div class="help">Presence is enabled when the build is configured to run with a Discord app ID.</div>
       </div>
       <div class="ver">v${esc(info.version || '0.2.0')}</div>
     </aside>`;
@@ -514,11 +797,12 @@
   function card(p) {
     const pr = progress(p);
     const ready = !!p.launch.target;
+    const lockBadge = p.isStarter && appMode !== 'dev' ? '<span class="pill st-Blocked">starter</span>' : '';
     return `<article class="card">
       <div class="card-top">
         <div class="tile">${svg(p.icon)}</div>
         <div class="card-head"><h3>${esc(p.name)}</h3>
-          <span class="head-r"><span class="pill st-${p.status}">${p.status}</span>
+          <span class="head-r">${lockBadge}<span class="pill st-${p.status}">${p.status}</span>
             <button class="icon-btn sm pin${p.pinned ? ' on' : ''}" data-act="pin" data-id="${p.id}" data-k="pin-${p.id}" aria-pressed="${p.pinned}" aria-label="${p.pinned ? 'Unpin' : 'Pin'} ${esc(p.name)}" title="${p.pinned ? 'Unpin' : 'Pin to top'}">${svg('star')}</button></span></div>
       </div>
       <p class="desc">${esc(p.desc) || '<span style="color:var(--faint)">No description yet.</span>'}</p>
@@ -555,7 +839,7 @@
         </div>
         <div class="note"><span class="tag">Next up</span>
           <span class="t">${nx ? `<b>${esc(nx.task)}</b> in ${esc(nx.p.name)}` : 'All caught up. Add a new project to keep going.'}</span>
-          ${nx ? `<button class="btn primary" data-act="open" data-id="${nx.p.id}" data-k="nx">${svg('play')}Continue</button>` : canEditProjects() ? '<button class="btn" data-act="new" data-k="new">Add project</button>' : '<button class="btn" data-act="palette" data-k="find-project">Find project</button>'}
+          ${nx ? `<button class="btn primary" data-act="open" data-id="${nx.p.id}" data-k="nx">${svg('play')}Continue</button>` : '<button class="btn" data-act="new" data-k="new">Add project</button>'}
         </div>
       </section>`;
     }
@@ -563,14 +847,34 @@
     const sortOpts = SORTS.map(([v, l]) => `<option value="${v}"${S.settings.sort === v ? ' selected' : ''}>${l}</option>`).join('');
     const total = S.projects.filter((p) => !track || p.track === track).length;
     return `${hero}${track ? '' : toolGrid(null)}
-      <div class="sec-head"><h2>${title}<small>${ui.q ? items.length + ' of ' + total : total}</small></h2>
+      <div class="sec-head"><h2>${title}<small id="project-result-count">${ui.q ? items.length + ' of ' + total : total}</small></h2>
         <div class="tools">
           <label class="search">${svg('search')}<input id="flt" class="in" placeholder="Filter  ( / )" value="${esc(ui.q)}" aria-label="Filter projects" autocomplete="off"></label>
           <select id="srt" class="in sel" aria-label="Sort projects">${sortOpts}</select>
-          ${canEditProjects() ? `<button class="btn primary" data-act="new" data-k="new">${svg('plus')}New project</button>` : ''}
+          <button class="btn primary" data-act="new" data-k="new">${svg('plus')}New project</button>
         </div></div>
-      ${items.length ? `<div class="grid">${items.map(card).join('')}</div>`
-        : `<div class="panel"><p class="help">${ui.q ? 'No projects match that filter.' : 'Nothing here yet. Add your first ' + (track || '') + ' project.'}</p></div>`}`;
+      <div id="project-results">${items.length ? `<div class="grid">${items.map(card).join('')}</div>`
+        : `<div class="panel"><p class="help">${ui.q ? 'No projects match that filter.' : 'Nothing here yet. Add your first ' + (track || '') + ' project.'}</p></div>`}</div>`;
+  }
+
+  function updateProjectResults() {
+    const results = document.getElementById('project-results');
+    if (!results) return;
+    const track = ui.view === 'Android' || ui.view === 'PC' ? ui.view : null;
+    const items = visible(track);
+    const total = S.projects.filter((project) => !track || project.track === track).length;
+    const count = document.getElementById('project-result-count');
+    if (count) count.textContent = ui.q ? `${items.length} of ${total}` : String(total);
+    results.innerHTML = items.length ? `<div class="grid">${items.map(card).join('')}</div>`
+      : `<div class="panel"><p class="help">${ui.q ? 'No projects match that filter.' : 'Nothing here yet. Add your first ' + (track || '') + ' project.'}</p></div>`;
+  }
+
+  function scheduleSearchUpdate(update) {
+    if (searchUpdateFrame) return;
+    searchUpdateFrame = requestAnimationFrame(() => {
+      searchUpdateFrame = 0;
+      update();
+    });
   }
 
   function taskRow(t) {
@@ -588,19 +892,20 @@
     const p = find(ui.id);
     if (!p) { ui.view = 'home'; return viewList(null); }
     const pr = progress(p);
-    const status = STATUSES.map((s) => `<button data-act="status" data-v="${s}" data-k="st-${s}" class="${s === 'Blocked' ? 'blocked' : ''}" aria-pressed="${p.status === s}">${s}</button>`).join('');
+    const isLockedStarter = !!p.isStarter && appMode !== 'dev';
+    const status = STATUSES.map((s) => `<button data-act="status" data-v="${s}" data-k="st-${s}" class="${s === 'Blocked' ? 'blocked' : ''}" aria-pressed="${p.status === s}" ${isLockedStarter && appMode !== 'dev' ? 'disabled' : ''}>${s}</button>`).join('');
     const isApp = p.launch.mode === 'app';
     const links = p.links.map((k) => `<li class="link"><button class="linkbtn" data-act="openlink" data-id="${k.id}" data-k="lk-${k.id}" title="${esc(k.url)}">${svg('external')}<span><b>${esc(k.label)}</b>${k.label === hostOf(k.url) ? '' : `<small>${esc(hostOf(k.url))}</small>`}</span></button>
         <button class="x on" data-act="dellink" data-id="${k.id}" data-k="dl-${k.id}" aria-label="Remove link">${svg('x')}</button></li>`).join('');
-    const canEdit = canEditProjects();
+    const canEdit = canEditProjects() || !isLockedStarter;
     return `<button class="btn back" data-act="nav" data-v="${p.track}" data-k="back">${svg('back')}${p.track}</button>
     <section class="p-hero">
       <div class="tile">${svg(p.icon)}</div>
       <div class="p-title">
-        <input class="name-in" id="f-name" data-bind="name" value="${esc(p.name)}" maxlength="60" aria-label="Project name" ${canEdit ? '' : 'readonly'}>
-        <span class="p-sub">${p.track} &middot; ${pr.d} of ${pr.t} tasks done &middot; ${pr.pct}% synced</span>
+        <input class="name-in" id="f-name" data-bind="name" value="${esc(p.name)}" maxlength="60" aria-label="Project name" ${canEdit || !isLockedStarter ? '' : 'readonly'}>
+        <span class="p-sub">${p.track} &middot; ${pr.d} of ${pr.t} tasks done &middot; ${pr.pct}% synced${isLockedStarter ? ' &middot; starter template' : ''}</span>
       </div>
-      <button class="icon-btn pin${p.pinned ? ' on' : ''}" data-act="pin" data-id="${p.id}" data-k="pin" aria-pressed="${p.pinned}" aria-label="${p.pinned ? 'Unpin' : 'Pin'}" title="${p.pinned ? 'Unpin' : 'Pin to top'}" ${canEdit ? '' : 'disabled'}>${svg('star')}</button>
+      <button class="icon-btn pin${p.pinned ? ' on' : ''}" data-act="pin" data-id="${p.id}" data-k="pin" aria-pressed="${p.pinned}" aria-label="${p.pinned ? 'Unpin' : 'Pin'}" title="${p.pinned ? 'Unpin' : 'Pin to top'}" ${canEdit || !isLockedStarter ? '' : 'disabled'}>${svg('star')}</button>
       <div class="seg" role="group" aria-label="Status">${status}</div>
     </section>
     <div class="cols">
@@ -622,15 +927,15 @@
         <section class="panel">
           <h3>Launch</h3>
           <div class="seg" role="group" aria-label="Launch mode">
-            <button data-act="mode" data-v="app" data-k="m-app" aria-pressed="${isApp}" ${canEdit ? '' : 'disabled'}>Open app or file</button>
-            <button data-act="mode" data-v="command" data-k="m-cmd" aria-pressed="${!isApp}" ${canEdit ? '' : 'disabled'}>Run command</button>
+            <button data-act="mode" data-v="app" data-k="m-app" aria-pressed="${isApp}" ${canEdit || !isLockedStarter ? '' : 'disabled'}>Open app or file</button>
+            <button data-act="mode" data-v="command" data-k="m-cmd" aria-pressed="${!isApp}" ${canEdit || !isLockedStarter ? '' : 'disabled'}>Run command</button>
           </div>
           <div class="field"><span class="label">${isApp ? 'App or file' : 'Command'}</span>
-            <div class="row nowrap" data-drop="target"><input class="in" id="f-target" data-bind="target" value="${esc(p.launch.target)}" placeholder="${isApp ? 'Pick or drop an .exe, shortcut or file' : 'npm run dev'}" spellcheck="false" ${canEdit ? '' : 'readonly'}>
-              ${isApp && canEdit ? `<button class="btn" data-act="pick" data-v="file" data-k="pk-file">Browse</button>` : ''}</div></div>
+            <div class="row nowrap" data-drop="target"><input class="in" id="f-target" data-bind="target" value="${esc(p.launch.target)}" placeholder="${isApp ? 'Pick or drop an .exe, shortcut or file' : 'npm run dev'}" spellcheck="false" ${canEdit || !isLockedStarter ? '' : 'readonly'}>
+              ${isApp && (canEdit || !isLockedStarter) ? `<button class="btn" data-act="pick" data-v="file" data-k="pk-file">Browse</button>` : ''}</div></div>
           <div class="field"><span class="label">Project folder</span>
-            <div class="row nowrap" data-drop="folder"><input class="in" id="f-folder" data-bind="folder" value="${esc(p.folder)}" placeholder="Pick or drop the folder this project lives in" spellcheck="false" ${canEdit ? '' : 'readonly'}>
-              ${canEdit ? `<button class="btn" data-act="pick" data-v="folder" data-k="pk-folder">Browse</button>` : ''}</div></div>
+            <div class="row nowrap" data-drop="folder"><input class="in" id="f-folder" data-bind="folder" value="${esc(p.folder)}" placeholder="Pick or drop the folder this project lives in" spellcheck="false" ${canEdit || !isLockedStarter ? '' : 'readonly'}>
+              ${(canEdit || !isLockedStarter) ? `<button class="btn" data-act="pick" data-v="folder" data-k="pk-folder">Browse</button>` : ''}</div></div>
           <div class="actions">
             <button class="btn primary" data-act="launch" data-id="${p.id}" data-k="launch">${svg('play')}Launch</button>
             <button class="btn" data-act="reveal" data-k="reveal">${svg('folder')}Open folder</button>
@@ -653,7 +958,7 @@
             <div class="seg" role="group" aria-label="Track">${TRACKS.map((t) => `<button data-act="track" data-v="${t}" data-k="tr-${t}" aria-pressed="${p.track === t}" ${canEdit ? '' : 'disabled'}>${t}</button>`).join('')}</div></div>
           <div class="field"><span class="label">Icon</span>
             <div class="icons">${PICKABLE.map((k) => `<button data-act="icon" data-v="${k}" data-k="ic-${k}" aria-pressed="${p.icon === k}" aria-label="${k}" ${canEdit ? '' : 'disabled'}>${svg(k)}</button>`).join('')}</div></div>
-          ${canEdit ? `<div class="row"><button class="btn" data-act="dup" data-k="dup">Duplicate project</button>
+          ${canEdit || !isLockedStarter ? `<div class="row"><button class="btn" data-act="dup" data-k="dup">Duplicate project</button>
             <button class="btn danger${ui.confirmDel ? ' armed' : ''}" data-act="del" data-k="del">${svg('trash')}${ui.confirmDel ? 'Confirm delete' : 'Delete project'}</button>
             ${ui.confirmDel ? '<button class="btn" data-act="cancel" data-k="cancel">Keep it</button>' : ''}</div>` : '<p class="help">Developer mode is required for project setup and cleanup.</p>'}
         </section>
@@ -663,22 +968,18 @@
 
   function viewSettings() {
     const th = (id, label) => `<button class="theme-opt" data-act="theme" data-v="${id}" data-k="th-${id}" aria-pressed="${S.settings.theme === id}">
-        <span class="swatch s-${id}"><i></i><i></i></span><b>${label}</b></button>`;
+        <span class="swatch s-${id}"${id === 'custom' ? ` style="--custom-bg:${S.settings.customTheme.background};--custom-surface:${S.settings.customTheme.surface};--custom-accent:${S.settings.customTheme.accent}"` : ''}><i></i><i></i></span><b>${label}</b></button>`;
     const sw = (id, title, sub, on) => `<div class="switch-row"><div class="t"><b>${title}</b><span class="help">${sub}</span></div>
         <input type="checkbox" class="switch" id="${id}" data-act="${id}" ${on ? 'checked' : ''} aria-label="${title}"></div>`;
-    const keys = [['Ctrl K', 'Search and jump anywhere'], ['Ctrl N', 'New project'], ['Ctrl 1 to 7', 'Home, Spotify, Roblox, Discord, Android, PC, Settings'], ['/', 'Filter the project list'], ['Esc', 'Close or go back']];
-    const buildBadge = appMode === 'dev' ? 'Developer build' : 'Release build';
+    const keys = [['Ctrl K', 'Search and jump anywhere'], ['Ctrl N', 'New project'], ['Ctrl 1 to 8', 'Home, Spotify, Roblox, Discord, Android, PC, PS4, Settings'], ['/', 'Filter the project list'], ['Esc', 'Close or go back']];
     return `<div class="sec-head"><h2>Settings</h2></div>
     <div class="set-grid">
-      <section class="panel"><h3>Profile</h3>
-        <div class="field"><label class="label">Detected PC name</label>
-          <input class="in" value="${esc(S.settings.name || 'Detecting your PC name...')}" readonly aria-readonly="true"></div>
-        <div class="field"><label class="label" for="s-hub">Hub name</label>
-          <input class="in" id="s-hub" data-set="hubName" value="${esc(S.settings.hubName)}" maxlength="30"></div>
-      </section>
       ${intPanel()}
       <section class="panel"><h3>Appearance</h3>
-        <div class="themes">${th('dark', 'Midnight')}${th('rei', 'Rei light')}</div>
+        <div class="themes">${th('dark', 'Midnight')}${th('rei', 'Rei light')}${th('custom', 'Custom')}</div>
+        <div class="custom-palette"><div class="palette-title"><span class="label">Custom colors</span><button class="textbtn" data-act="theme-reset" data-k="theme-reset">Reset</button></div>
+          ${[['background', 'Window'], ['accent', 'Accent'], ['surface', 'Surfaces']].map(([key, label]) => `<label class="color-setting"><span>${label}</span><input type="color" value="${esc(S.settings.customTheme[key])}" data-theme-color="${key}" aria-label="Custom theme ${label.toLowerCase()} color"></label>`).join('')}
+        </div>
         <div class="pref-list">
           ${sw('compactMode', 'Compact project cards', 'Fit more projects on screen with tighter spacing.', S.settings.compactMode)}
           ${sw('reduceMotion', 'Reduce interface motion', 'Limit movement and transitions throughout YuniHub.', S.settings.reduceMotion)}
@@ -704,7 +1005,11 @@
       </section>
       <section class="panel"><h3>About</h3>
         <p class="help">${esc(S.settings.hubName)} v${esc(info.version || '0.2.0')}</p>
-        <span class="label">Build mode</span><span class="mono">${esc(buildBadge)}</span>
+        <div class="update-status" aria-live="polite"><span class="dot${['checking', 'downloading'].includes(updateInfo.status) ? '' : ' off'}"></span><span>${esc(updateInfo.message)}</span></div>
+        ${updateInfo.status === 'available' ? '<button class="btn primary" data-act="update-download" data-k="update-download">Download update</button>' : ''}
+        ${updateInfo.status === 'downloading' ? `<div class="meter"><i style="--p:${Math.max(0, Math.min(100, Number(updateInfo.percent) || 0))}%"></i></div>` : ''}
+        ${updateInfo.status === 'downloaded' ? '<button class="btn primary" data-act="update-install" data-k="update-install">Restart to install</button>' : ''}
+        <button class="btn" data-act="update-check" data-k="update-check"${['checking', 'downloading'].includes(updateInfo.status) ? ' disabled' : ''}>Check for updates</button>
         <span class="label">Data file</span><span class="mono">${esc(info.dataFile || '')}</span>
       </section>
     </div>`;
@@ -731,6 +1036,7 @@
 
   function render() {
     const root = document.getElementById('app');
+    if (scriptEditor) { scriptEditor.destroy(); scriptEditor = null; }
     const ae = document.activeElement;
     let key = null, ss = null, se = null;
     if (ae && ae !== document.body && root.contains(ae)) {
@@ -743,11 +1049,11 @@
     let body;
     if (ui.view === 'project') body = viewProject();
     else if (ui.view === 'settings') body = viewSettings();
-    else if (['Spotify', 'Roblox', 'Discord'].includes(ui.view)) body = viewTools(ui.view);
+    else if (['Spotify', 'Roblox', 'PS4', 'Discord'].includes(ui.view)) body = viewTools(ui.view);
     else if (ui.view === 'Android' || ui.view === 'PC') body = viewList(ui.view);
     else body = viewList(null);
 
-    root.innerHTML = `<div class="app">${sidebar()}<main class="main" id="main">${body}</main></div>${modal()}`;
+    root.innerHTML = `<div class="app">${sidebar()}<main class="main" id="main">${body}</main></div>${modal()}${scriptDetailsModal()}${scriptConflictModal()}`;
 
     const main = root.querySelector('.main');
     if (main) main.scrollTop = scroll;
@@ -758,6 +1064,10 @@
         el.focus({ preventScroll: true });
         if (ss != null) { try { el.setSelectionRange(ss, se); } catch { /* ignore */ } }
       }
+    }
+    if (ui.scriptDetails) {
+      const mount = root.querySelector('#script-editor');
+      if (mount) mountScriptEditor(mount, ui.scriptDetails);
     }
   }
 
@@ -773,7 +1083,7 @@
   function paletteItems() {
     const items = [];
     const nav = (label, view, icon) => items.push({ label, hint: 'Go to', icon, run: () => go(view) });
-    nav('Home', 'home', 'home'); nav('Spotify', 'Spotify', 'headphones'); nav('Roblox', 'Roblox', 'package'); nav('Discord Status', 'Discord', 'chat'); nav('Android projects', 'Android', 'phone'); nav('PC projects', 'PC', 'monitor'); nav('Settings', 'settings', 'sliders');
+    nav('Home', 'home', 'home'); nav('Spotify', 'Spotify', 'headphones'); nav('Roblox', 'Roblox', 'package'); nav('Discord Status', 'Discord', 'chat'); nav('Android projects', 'Android', 'phone'); nav('PC projects', 'PC', 'monitor'); nav('PS4 tools', 'PS4', 'gamepad'); nav('Settings', 'settings', 'sliders');
     items.push({ label: 'New project', hint: 'Action', icon: 'plus', run: () => openNew() });
     items.push({ label: S.settings.theme === 'dark' ? 'Switch to Rei light theme' : 'Switch to Midnight theme', hint: 'Action', icon: 'theme',
       run: () => { S.settings.theme = S.settings.theme === 'dark' ? 'rei' : 'dark'; applyTheme(); touch(); render(); } });
@@ -849,7 +1159,6 @@
   }
 
   function openNew() {
-    if (!gateProjectEditor('Developer mode is required to create projects.')) return;
     ui.modal = true;
     drafts.track = ui.view === 'PC' ? 'PC' : 'Android';
     delete drafts.mtpl;
@@ -858,8 +1167,8 @@
   }
 
   function addTask() {
-    if (!gateProjectEditor('Developer mode is required to add tasks.')) return;
     const p = find(ui.id); if (!p) return;
+    if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return;
     const el = document.getElementById('nt');
     const v = clip(el && el.value, 160);
     if (!v) { if (el) el.focus(); return; }
@@ -870,8 +1179,8 @@
   }
 
   function addLink() {
-    if (!gateProjectEditor('Developer mode is required to manage links.')) return;
     const p = find(ui.id); if (!p) return;
+    if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return;
     const url = cleanUrl(document.getElementById('lk-url').value);
     if (!url) { toast('Enter a valid web address.', 'err'); document.getElementById('lk-url').focus(); return; }
     const label = clip(document.getElementById('lk-label').value, 60) || hostOf(url);
@@ -882,10 +1191,10 @@
   }
 
   function commitEdit() {
-    if (!gateProjectEditor('Developer mode is required to edit tasks.')) return;
     const id = ui.editTask;
     if (!id) return;
     const p = find(ui.id); const t = p && p.tasks.find((x) => x.id === id);
+    if (p && !gateProjectEditor('This starter template is locked to developer mode.', p)) return;
     const el = document.getElementById('te');
     const v = clip(el && el.value, 160);
     ui.editTask = null;
@@ -894,7 +1203,6 @@
   }
 
   function addProject() {
-    if (!gateProjectEditor('Developer mode is required to add projects.')) return;
     const name = clip(drafts.mname, 60);
     if (!name) { const el = document.getElementById('m-name'); if (el) el.focus(); return; }
     const track = drafts.track || 'Android';
@@ -920,22 +1228,23 @@
     if (!t) return;
     const act = t.dataset.act;
     if (act === 'scrim') { if (e.target === t) { ui.modal = false; render(); } return; }
+    if (act === 'script-preview-scrim') { if (e.target === t) { ui.scriptDetails = null; render(); } return; }
     const p = ui.id ? find(ui.id) : null;
 
     switch (act) {
       case 'nav': go(t.dataset.v); break;
       case 'open': go('project', t.dataset.id); break;
       case 'palette': openPalette(); break;
-      case 'pin': { if (!gateProjectEditor('Developer mode is required to pin or reorder projects.')) return; const pp = find(t.dataset.id); if (pp) { pp.pinned = !pp.pinned; touch(); render(); } } break;
+      case 'pin': { const pp = find(t.dataset.id); if (!gateProjectEditor('This starter template is locked to developer mode.', pp)) return; if (pp) { pp.pinned = !pp.pinned; touch(); render(); } } break;
       case 'launch': { const lp = find(t.dataset.id || ui.id); if (lp) { await flush(); runLaunch(lp); } } break;
       case 'reveal': if (p) { const r = await API.reveal(p.folder); if (!r.ok) toast(r.error, 'err'); } break;
       case 'code': if (p) { const r = await API.openCode(p.folder); if (!r.ok) toast(r.error, 'err'); } break;
-      case 'status': if (!gateProjectEditor('Developer mode is required to edit project status.')) return; if (p) { p.status = t.dataset.v; touch(); render(); } break;
-      case 'track': if (!gateProjectEditor('Developer mode is required to change the project track.')) return; if (p) { p.track = t.dataset.v; touch(); render(); } break;
-      case 'icon': if (!gateProjectEditor('Developer mode is required to change the project icon.')) return; if (p) { p.icon = t.dataset.v; touch(); render(); } break;
-      case 'mode': if (!gateProjectEditor('Developer mode is required to edit launch setup.')) return; if (p) { p.launch.mode = t.dataset.v; touch(); render(); } break;
-      case 'edittask': if (!gateProjectEditor('Developer mode is required to edit tasks.')) return; ui.editTask = t.dataset.id; render(); { const el = document.getElementById('te'); if (el) { el.focus(); el.select(); } } break;
-      case 'deltask': if (!gateProjectEditor('Developer mode is required to remove tasks.')) return; if (p) {
+      case 'status': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) { p.status = t.dataset.v; touch(); render(); } break;
+      case 'track': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) { p.track = t.dataset.v; touch(); render(); } break;
+      case 'icon': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) { p.icon = t.dataset.v; touch(); render(); } break;
+      case 'mode': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) { p.launch.mode = t.dataset.v; touch(); render(); } break;
+      case 'edittask': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; ui.editTask = t.dataset.id; render(); { const el = document.getElementById('te'); if (el) { el.focus(); el.select(); } } break;
+      case 'deltask': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) {
         const i = p.tasks.findIndex((x) => x.id === t.dataset.id);
         if (i >= 0) {
           const [gone] = p.tasks.splice(i, 1);
@@ -943,7 +1252,7 @@
           toast('Task removed.', '', { label: 'Undo', fn: () => { p.tasks.splice(Math.min(i, p.tasks.length), 0, gone); touch(); render(); } });
         }
       } break;
-      case 'cleardone': if (!gateProjectEditor('Developer mode is required to clear tasks.')) return; if (p) {
+      case 'cleardone': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) {
         const before = p.tasks.slice();
         p.tasks = p.tasks.filter((x) => !x.d);
         touch(); render();
@@ -952,17 +1261,17 @@
       case 'addtask': addTask(); break;
       case 'addlink': addLink(); break;
       case 'openlink': if (p) { const k = p.links.find((x) => x.id === t.dataset.id); if (k) { const r = await API.openUrl(k.url); if (r && !r.ok) toast(r.error, 'err'); } } break;
-      case 'dellink': if (!gateProjectEditor('Developer mode is required to remove links.')) return; if (p) { p.links = p.links.filter((x) => x.id !== t.dataset.id); touch(); render(); } break;
-      case 'pick': if (!gateProjectEditor('Developer mode is required to edit the project setup.')) return; if (p) {
+      case 'dellink': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) { p.links = p.links.filter((x) => x.id !== t.dataset.id); touch(); render(); } break;
+      case 'pick': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) {
         const path = await API.pick(t.dataset.v);
         if (path) { if (t.dataset.v === 'folder') p.folder = path; else p.launch.target = path; touch(); render(); }
       } break;
-      case 'dup': if (!gateProjectEditor('Developer mode is required to duplicate projects.')) return; if (p) {
+      case 'dup': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) {
         const copy = normProject({ ...JSON.parse(JSON.stringify(p)), id: uid(), name: clip(p.name + ' copy', 60), pinned: false, opened: 0, created: Date.now(),
           tasks: p.tasks.map((x) => ({ ...x, id: uid() })), links: p.links.map((x) => ({ ...x, id: uid() })) });
         S.projects.push(copy); touch(); go('project', copy.id); toast('Project duplicated.', 'ok');
       } break;
-      case 'del': if (!gateProjectEditor('Developer mode is required to delete projects.')) return; if (p) {
+      case 'del': if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return; if (p) {
         if (ui.confirmDel) {
           const idx = S.projects.indexOf(p);
           S.projects.splice(idx, 1); touch(); go('home');
@@ -976,6 +1285,70 @@
       case 'madd': addProject(); break;
       case 'mcancel': ui.modal = false; render(); break;
       case 'tool': await runTool(t.dataset.id); break;
+      case 'script-refresh': await refreshScripts(true); break;
+      case 'script-details': await openScriptDetails({ source: t.dataset.source, name: t.dataset.name }); break;
+      case 'script-details-close': ui.scriptDetails = null; render(); break;
+      case 'script-bundle-ack': {
+        const result = await API.acknowledgeScriptBundle(t.dataset.v);
+        if (!result || !result.ok) toast((result && result.error) || 'Could not acknowledge this bundle.', 'err');
+        await refreshScripts();
+      } break;
+      case 'script-remove': {
+        const result = await API.removeManagedScript(t.dataset.destination, t.dataset.name);
+        if (!result || !result.ok) toast((result && result.error) || 'Could not remove this managed script.', 'err');
+        else toast(`Removed ${t.dataset.name}.`, 'ok');
+        await refreshScripts();
+      } break;
+      case 'script-backups': { const result = await API.openScriptBackups(); if (!result || !result.ok) toast((result && result.error) || 'Could not open script backups.', 'err'); } break;
+      case 'profile-new': createExecutorProfile(); break;
+      case 'profile-save': saveExecutorProfile(); break;
+      case 'profile-delete': deleteExecutorProfile(); break;
+      case 'theme-reset': {
+        S.settings.customTheme = { ...DEFAULT_CUSTOM_THEME };
+        S.settings.theme = 'custom';
+        applyTheme(); touch(); render();
+      } break;
+      case 'update-check': {
+        const result = await API.checkUpdates();
+        if (!result || !result.ok) toast((result && result.error) || 'Could not check for updates.', 'err');
+      } break;
+      case 'update-download': {
+        const result = await API.downloadUpdate();
+        if (!result || !result.ok) toast((result && result.error) || 'Could not start the update download.', 'err');
+      } break;
+      case 'update-install': {
+        const result = await API.installUpdate();
+        if (!result || !result.ok) toast((result && result.error) || 'Could not install the update.', 'err');
+      } break;
+      case 'script-copy': {
+        const selection = Array.from(selectedScripts.values());
+        if (!selection.length) { toast('Select at least one script first.', 'err'); break; }
+        const request = {
+          selection,
+          userFolder: S.settings.scripts,
+          autoexecFolder: S.settings.autoexec,
+          executorPath: S.settings.exe,
+          action: t.dataset.mode
+        };
+        const result = await API.copyScripts(request);
+        if (result && result.conflict) {
+          ui.scriptConflicts = { ...request, conflicts: result.conflicts || [] };
+          render();
+          break;
+        }
+        if (result && result.ok) toast(`${result.count} script${result.count === 1 ? '' : 's'} copied.`, 'ok');
+        else toast((result && result.error) || 'Could not copy the selected scripts.', 'err');
+      } break;
+      case 'script-conflict-cancel': ui.scriptConflicts = null; render(); break;
+      case 'script-conflict-replace': {
+        const pending = ui.scriptConflicts;
+        ui.scriptConflicts = null;
+        if (!pending) break;
+        const result = await API.copyScripts({ ...pending, replaceExisting: true });
+        if (result && result.ok) toast(`${result.count} copied; ${result.replacements.length} existing file${result.replacements.length === 1 ? '' : 's'} backed up.`, 'ok');
+        else toast((result && result.error) || 'Could not replace the selected files.', 'err');
+        await refreshScripts();
+      } break;
       case 'rpclink': await connectRpc(); break;
       case 'rpcout': {
         await API.rpcDisconnect();
@@ -1011,7 +1384,7 @@
         await connectRpc();
         if (rpcUser) finishWelcome();
       } break;
-      case 'setpick': { const pth = await API.pick(t.dataset.v); if (pth) { S.settings[t.dataset.f] = pth; touch(); render(); } } break;
+      case 'setpick': { const pth = await API.pick(t.dataset.v); if (pth) { S.settings[t.dataset.f] = pth; syncActiveExecutorProfile(); touch(); if (t.dataset.f === 'scripts') { selectedScripts.clear(); watchedScriptsPath = null; await refreshScripts(); } render(); } } break;
       case 'ut': { const r = await API.saveUserscript(); if (r.ok) toast('Userscript saved.', 'ok'); else if (!r.canceled) toast(r.error || 'Could not save it.', 'err'); } break;
       case 'theme': S.settings.theme = t.dataset.v; applyTheme(); touch(); render(); break;
       case 'openbackups': { const r = await API.openBackups(); if (!r.ok) toast(r.error, 'err'); } break;
@@ -1034,11 +1407,30 @@
   document.addEventListener('change', async (e) => {
     const t = e.target;
     if (!t) return;
+    if (t.id === 's-profile-select') { await switchExecutorProfile(t.value); return; }
+    if (t.id === 's-profile-name') {
+      const profile = activeExecutorProfile();
+      if (profile) { profile.name = clip(t.value, 50) || 'Executor profile'; touch(); }
+      render(); return;
+    }
+    if (t.id === 'script-game-filter') { gameFilter = t.value; render(); return; }
+    if (t.id === 'script-executor-filter') { executorFilter = t.value; render(); return; }
+    if (t.matches('.script-check')) {
+      const script = { source: t.dataset.source, name: t.dataset.name };
+      const key = `${script.source}:${script.name}`;
+      if (t.checked) {
+        const metadata = scriptCatalog.scripts.find((item) => item.source === script.source && item.name === script.name);
+        selectedScripts.set(key, { ...script, supportsAutoload: !!(metadata && metadata.supportsAutoload) });
+      }
+      else selectedScripts.delete(key);
+      render();
+      return;
+    }
     if (t.id === 'te') { commitEdit(); return; }
     if (t.id === 'srt') { S.settings.sort = t.value; touch(); render(); return; }
     if (t.dataset && t.dataset.act === 'toggle') {
-      if (!gateProjectEditor('Developer mode is required to complete tasks.')) { t.checked = !t.checked; return; }
       const p = find(ui.id); const task = p && p.tasks.find((x) => x.id === t.dataset.id);
+      if (!gateProjectEditor('This starter template is locked to developer mode.', p)) { t.checked = !t.checked; return; }
       if (task) { task.d = t.checked; touch(); render(); }
     } else if (t.dataset && t.dataset.act === 'login') {
       info.openAtLogin = !!(await API.setLogin(t.checked));
@@ -1059,6 +1451,8 @@
       const k = t.dataset.set;
       S.settings[k] = clip(t.value, { name: 40, hubName: 30 }[k] || 500) || (k === 'hubName' ? 'YuniHub' : '');
       if (k === 'city') refreshWeather();
+      if (k === 'scripts') { selectedScripts.clear(); await refreshScripts(); }
+      if (k === 'exe' || k === 'autoexec') syncActiveExecutorProfile();
       touch(); render();
     }
   });
@@ -1066,11 +1460,22 @@
   document.addEventListener('input', (e) => {
     const t = e.target;
     if (!t) return;
-    if (t.id === 'flt') { ui.q = t.value; render(); return; }
+    if (t.dataset && t.dataset.themeColor) {
+      const key = t.dataset.themeColor;
+      if (!Object.hasOwn(S.settings.customTheme, key)) return;
+      S.settings.customTheme[key] = validHex(t.value, DEFAULT_CUSTOM_THEME[key]);
+      S.settings.theme = 'custom';
+      applyTheme();
+      document.querySelectorAll('.theme-opt').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.v === 'custom')));
+      touch();
+      return;
+    }
+    if (t.id === 'flt') { ui.q = t.value; scheduleSearchUpdate(updateProjectResults); return; }
+    if (t.id === 'script-search') { scriptQuery = t.value; scheduleSearchUpdate(updateScriptResults); return; }
     if (!t.dataset) return;
     if (t.dataset.bind) {
-      if (!gateProjectEditor('Developer mode is required to edit project details.')) return;
       const p = find(ui.id); if (!p) return;
+      if (!gateProjectEditor('This starter template is locked to developer mode.', p)) return;
       const f = t.dataset.bind;
       if (f === 'target') p.launch.target = clip(t.value, 500);
       else if (f === 'name') p.name = clip(t.value, 60) || 'Untitled';
@@ -1094,12 +1499,14 @@
     if (pal.open) { paletteKey(e); return; }
 
     if (mod && key === 'n') { e.preventDefault(); if (!ui.modal) openNew(); return; }
-    if (mod && ['1', '2', '3', '4', '5', '6', '7'].includes(key)) {
+    if (mod && ['1', '2', '3', '4', '5', '6', '7', '8'].includes(key)) {
       e.preventDefault();
-      go(['home', 'Spotify', 'Roblox', 'Discord', 'Android', 'PC', 'settings'][+key - 1]);
+      go(['home', 'Spotify', 'Roblox', 'Discord', 'Android', 'PC', 'PS4', 'settings'][+key - 1]);
       return;
     }
     if (e.key === 'Escape') {
+      if (ui.scriptConflicts) { ui.scriptConflicts = null; render(); return; }
+      if (ui.scriptDetails) { ui.scriptDetails = null; render(); return; }
       if (ui.modal) { ui.modal = false; render(); }
       else if (ui.editTask) { ui.editTask = null; render(); }
       else if (e.target && e.target.id === 'flt' && ui.q) { ui.q = ''; render(); }
@@ -1134,7 +1541,8 @@
   document.addEventListener('dragstart', (e) => {
     const li = e.target.closest && e.target.closest('.task[data-tid]');
     if (!li) return;
-    if (!gateProjectEditor('Developer mode is required to reorder tasks.')) {
+    const p = find(ui.id);
+    if (!gateProjectEditor('This starter template is locked to developer mode.', p)) {
       e.preventDefault();
       return;
     }
@@ -1164,11 +1572,11 @@
   document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) setZone(null); });
   document.addEventListener('drop', async (e) => {
     if (hasFiles(e)) {
-      if (!gateProjectEditor('Developer mode is required to edit the project setup.')) { e.preventDefault(); return; }
+      const p = ui.view === 'project' ? find(ui.id) : null;
+      if (!gateProjectEditor('This starter template is locked to developer mode.', p)) { e.preventDefault(); return; }
       e.preventDefault();
       const zone = e.target.closest ? e.target.closest('[data-drop]') : null;
       setZone(null);
-      const p = ui.view === 'project' ? find(ui.id) : null;
       if (!zone || !p) return;
       const file = e.dataTransfer.files[0];
       const path = file && API.pathFor ? API.pathFor(file) : '';
@@ -1209,8 +1617,11 @@
         info = i;
         appMode = info.buildMode || appMode;
       }
+      if (API.updateState) updateInfo = await API.updateState();
     } catch { /* keep the starter projects */ }
-    if (info.userName && (!S.settings.name || S.settings.name === 'User')) S.settings.name = info.userName;
+    if (info.userName) S.settings.name = info.userName;
+    const profile = activeExecutorProfile();
+    if (profile) { S.settings.exe = profile.executorPath; S.settings.autoexec = profile.autoexecFolder; }
     if (!S.settings.city && info.weatherCity) S.settings.city = info.weatherCity;
     if (!S.settings.hubName) S.settings.hubName = 'YuniHub';
     applyTheme();
@@ -1224,6 +1635,9 @@
       setTimeout(() => splash.classList.add('hidden'), 780);
     }
     if (firstRun) { dirty = true; flush(); } // write the starter projects once so the file exists
+    refreshScripts();
+    if (API.onScriptsChanged) API.onScriptsChanged(() => refreshScripts());
+    if (API.onScriptsWatchError) API.onScriptsWatchError((message) => toast(message || 'Could not watch the selected script folder.', 'err'));
     if (API.onDiscordAuth) {
       API.onDiscordAuth((payload) => {
         if (!payload || typeof payload !== 'object') return;
@@ -1242,6 +1656,10 @@
         }
       });
     }
+    if (API.onUpdateStatus) API.onUpdateStatus((status) => {
+      updateInfo = status || updateInfo;
+      if (ui.view === 'settings') render();
+    });
     if (S.settings.discordSession) refreshDiscordProfile();
     API.setBeacons(S.settings.beacons);
     refreshWeather();

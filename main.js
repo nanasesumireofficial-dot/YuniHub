@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const chokidar = require('chokidar');
+const { autoUpdater } = require('electron-updater');
 
 const isWin = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
@@ -13,8 +15,17 @@ const AUTH_SERVER_URL = (process.env.YUNIHUB_AUTH_URL || process.env.AUTH_SERVER
 
 const THEMES = {
   dark: { color: '#05070d', symbolColor: '#d9dcff' },
-  rei: { color: '#e8f1fa', symbolColor: '#1b3550' }
+  rei: { color: '#e8f1fa', symbolColor: '#1b3550' },
+  custom: { color: '#101114', symbolColor: '#ffffff' }
 };
+const validHexColor = (value) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+function resolveTheme(theme, customBackground) {
+  const base = THEMES[theme] || THEMES.dark;
+  if (theme !== 'custom' || !validHexColor(customBackground)) return base;
+  const channels = customBackground.slice(1).match(/.{2}/g).map((part) => parseInt(part, 16) / 255);
+  const luminance = .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+  return { ...base, color: customBackground, symbolColor: luminance > .56 ? '#1b1719' : '#ffffff' };
+}
 
 function detectSystemProfile() {
   const timezoneCityMap = {
@@ -29,20 +40,38 @@ function detectSystemProfile() {
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
     const city = timezoneCityMap[tz] || 'New York';
-    const name = (os.userInfo && typeof os.userInfo === 'function' ? os.userInfo().username : '') || os.hostname() || 'User';
+    const name = (os.hostname && os.hostname()) || (os.userInfo && typeof os.userInfo === 'function' ? os.userInfo().username : '') || 'User';
     return { name, city };
   } catch {
     return { name: os.hostname() || 'User', city: 'New York' };
   }
 }
 
-const ICON = path.join(__dirname, 'build', 'icon.png');
+const PNG_APP_ICON = path.join(__dirname, 'build', 'icon.png');
+const SVG_APP_ICON = path.join(__dirname, 'build', 'yunihub-icon.svg');
+const ICON = fs.existsSync(PNG_APP_ICON) ? PNG_APP_ICON : SVG_APP_ICON;
 const HOTKEY = 'CommandOrControl+Alt+H';
 
 let win = null;
 let tray = null;
 let quitting = false;
 let prefs = { closeToTray: false, hotkey: false };
+let updateState = { status: 'idle', version: '', percent: 0, message: 'Updates are checked when YuniHub starts.' };
+
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function setUpdateState(status, message, details = {}) {
+  updateState = { ...updateState, ...details, status, message };
+  if (win && !win.isDestroyed()) win.webContents.send('update:status', updateState);
+}
+
+autoUpdater.on('checking-for-update', () => setUpdateState('checking', 'Checking GitHub Releases for an update...'));
+autoUpdater.on('update-available', (release) => setUpdateState('available', `YuniHub ${release.version} is available.`, { version: release.version, percent: 0 }));
+autoUpdater.on('update-not-available', (release) => setUpdateState('current', 'YuniHub is up to date.', { version: release.version || app.getVersion(), percent: 0 }));
+autoUpdater.on('download-progress', (progress) => setUpdateState('downloading', `Downloading update: ${Math.round(progress.percent)}%`, { percent: progress.percent }));
+autoUpdater.on('update-downloaded', (release) => setUpdateState('downloaded', `YuniHub ${release.version} is ready to install.`, { version: release.version, percent: 100 }));
+autoUpdater.on('error', (error) => setUpdateState('error', error && error.message ? error.message : 'The update check failed.'));
 
 const dataFile = () => path.join(app.getPath('userData'), 'hub.json');
 const backupDir = () => path.join(app.getPath('userData'), 'backups');
@@ -258,7 +287,7 @@ let beacons = { youtube: false, twitch: false };
 let beaconServer = null;
 
 const USERSCRIPT = `// ==UserScript==
-// @name         Yuniku Hub Beacon
+// @name         Yuniku Broswer RPC
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
 // @grant        GM_xmlhttpRequest
@@ -291,7 +320,12 @@ function rpcDisconnect() {
 function rpcConnect(clientId) {
   rpcDisconnect();
   return new Promise((resolve) => {
-    if (!/^\d{15,25}$/.test(clientId || '')) return resolve({ ok: false, error: 'Enter a valid Discord application ID in Settings.' });
+    const normalizedClientId = str(clientId, 30) || (APP_MODE === 'dev'
+      ? (process.env.YUNIHUB_DISCORD_APP_ID_DEV || process.env.DISCORD_APP_ID_DEV || process.env.DISCORD_APP_ID || '')
+      : (process.env.YUNIHUB_DISCORD_APP_ID || process.env.DISCORD_APP_ID || ''));
+
+    if (!/^\d{15,25}$/.test(normalizedClientId)) return resolve({ ok: false, error: 'Discord presence is not configured for this build.' });
+
     let i = 0, done = false, buf = Buffer.alloc(0);
     const finish = (r) => { if (!done) { done = true; resolve(r); } };
     const pipe = (n) => (isWin ? `\\\\?\\pipe\\discord-ipc-${n}` : path.join(process.env.XDG_RUNTIME_DIR || process.env.TMPDIR || '/tmp', `discord-ipc-${n}`));
@@ -302,7 +336,7 @@ function rpcConnect(clientId) {
       s.once('connect', () => {
         s.removeListener('error', attempt);
         rpc.sock = s;
-        s.write(rpcFrame(0, { v: 1, client_id: clientId }));
+        s.write(rpcFrame(0, { v: 1, client_id: normalizedClientId }));
         s.on('error', () => finish({ ok: false, error: 'Discord connection failed.' }));
         s.on('data', (d) => {
           buf = Buffer.concat([buf, d]);
@@ -380,18 +414,279 @@ async function getWeather(city) {
   }
 }
 
-// Copies every .lua/.luau/.txt script from the scripts folder into the executor's autoexec folder.
-function autoLoad(src, dest) {
-  src = str(src, 1000); dest = str(dest, 1000);
-  if (!isDir(src)) return { ok: false, error: 'Set your scripts folder in Settings.' };
-  if (!isDir(dest)) return { ok: false, error: 'Set your executor autoexec folder in Settings.' };
+const SCRIPT_EXTENSIONS = /\.(lua|luau|txt)$/i;
+const BUILTIN_SCRIPTS_DIR = path.join(__dirname, 'yuniku-scripts');
+const SCRIPT_CATALOG_FILE = path.join(BUILTIN_SCRIPTS_DIR, 'catalog.json');
+const SCRIPT_BUNDLE_STATE_FILE = () => path.join(app.getPath('userData'), 'script-bundle-state.json');
+const MANAGED_SCRIPTS_FILE = () => path.join(app.getPath('userData'), 'managed-scripts.json');
+let scriptWatcher = null;
+let scriptChangeTimer = null;
+
+function stringList(value, limit = 20) {
+  return (Array.isArray(value) ? value : []).map((item) => str(item, 50)).filter(Boolean).slice(0, limit);
+}
+
+function readScriptCatalog() {
   try {
-    const files = fs.readdirSync(src).filter((n) => /\.(lua|luau|txt)$/i.test(n));
-    files.forEach((n) => fs.copyFileSync(path.join(src, n), path.join(dest, n)));
-    return { ok: true, count: files.length };
+    const stat = fs.statSync(SCRIPT_CATALOG_FILE);
+    if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error('Invalid catalog size.');
+    const catalog = JSON.parse(fs.readFileSync(SCRIPT_CATALOG_FILE, 'utf8'));
+    return {
+      version: str(catalog.version, 40) || '0.0.0',
+      changes: stringList(catalog.changes, 30),
+      scripts: Array.isArray(catalog.scripts) ? catalog.scripts.slice(0, 500) : []
+    };
+  } catch {
+    return { version: '0.0.0', changes: [], scripts: [] };
+  }
+}
+
+function normalizeScriptMetadata(metadata, name) {
+  const value = metadata && typeof metadata === 'object' ? metadata : {};
+  return {
+    title: str(value.title, 100) || name,
+    description: str(value.description, 1000),
+    version: str(value.version, 40) || 'Unversioned',
+    author: str(value.author, 100) || 'Unknown',
+    games: stringList(value.games),
+    supportedExecutors: stringList(value.supportedExecutors),
+    tags: stringList(value.tags)
+  };
+}
+
+function readUserScriptMetadata(directory, name) {
+  const sidecar = path.join(directory, `${name}.json`);
+  try {
+    if (!fs.lstatSync(sidecar).isFile() || fs.statSync(sidecar).size > 32 * 1024) return {};
+    return JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function supportsExecutorAutoload(filePath) {
+  if (!/\.(lua|luau)$/i.test(filePath)) return false;
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const header = Buffer.alloc(16 * 1024);
+    const bytesRead = fs.readSync(fd, header, 0, header.length, 0);
+    return header.subarray(0, bytesRead).toString('utf8').split(/\r?\n/, 25)
+      .some((line) => /^\s*--\s*YUNIHUB_AUTOLOAD_SUPPORTED:\s*true\s*$/i.test(line));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function listScriptDirectory(directory, source, catalog = { scripts: [] }) {
+  if (!isDir(directory)) return [];
+  try {
+    const bundledMetadata = new Map(catalog.scripts
+      .filter((item) => item && typeof item.file === 'string')
+      .map((item) => [item.file, item]));
+    return fs.readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && SCRIPT_EXTENSIONS.test(entry.name) && (source !== 'builtin' || bundledMetadata.has(entry.name)))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 100)
+      .map((entry) => {
+        const filePath = path.join(directory, entry.name);
+        const metadata = source === 'builtin' ? bundledMetadata.get(entry.name) : readUserScriptMetadata(directory, entry.name);
+        return {
+          source,
+          name: entry.name,
+          ...normalizeScriptMetadata(metadata, entry.name),
+          supportsAutoload: supportsExecutorAutoload(filePath)
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+function listScripts(userFolder) {
+  userFolder = str(userFolder, 1000);
+  const catalog = readScriptCatalog();
+  const scripts = listScriptDirectory(BUILTIN_SCRIPTS_DIR, 'builtin', catalog);
+  const userFolderValid = !userFolder || isDir(userFolder);
+  if (userFolderValid && userFolder) scripts.push(...listScriptDirectory(userFolder, 'user'));
+  scripts.sort((a, b) => (a.source === b.source ? a.name.localeCompare(b.name) : a.source === 'builtin' ? -1 : 1));
+  let seenVersion = '';
+  try { seenVersion = str(JSON.parse(fs.readFileSync(SCRIPT_BUNDLE_STATE_FILE(), 'utf8')).version, 40); } catch { /* first launch */ }
+  return {
+    ok: true,
+    scripts,
+    userFolderValid,
+    bundle: { version: catalog.version, changes: catalog.changes, updateAvailable: catalog.version !== '0.0.0' && seenVersion !== catalog.version }
+  };
+}
+
+function resolveScript(selection, userFolder) {
+  if (!selection || !['builtin', 'user'].includes(selection.source)) return null;
+  const name = str(selection.name, 255);
+  if (!name || name !== path.basename(name) || !SCRIPT_EXTENSIONS.test(name)) return null;
+  const directory = selection.source === 'builtin' ? BUILTIN_SCRIPTS_DIR : str(userFolder, 1000);
+  if (!directory || !isDir(directory)) return null;
+  const filePath = path.join(directory, name);
+  try {
+    if (!fs.lstatSync(filePath).isFile()) return null;
+    const catalog = selection.source === 'builtin' ? readScriptCatalog() : null;
+    const metadata = selection.source === 'builtin'
+      ? catalog.scripts.find((item) => item && item.file === name)
+      : readUserScriptMetadata(directory, name);
+    if (selection.source === 'builtin' && !metadata) return null;
+    return { filePath, source: selection.source, name, metadata: normalizeScriptMetadata(metadata, name), supportsAutoload: supportsExecutorAutoload(filePath) };
+  } catch {
+    return null;
+  }
+}
+
+function readManagedScripts() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(MANAGED_SCRIPTS_FILE(), 'utf8'));
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === 'object') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeManagedScripts(items) {
+  const file = MANAGED_SCRIPTS_FILE();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(items, null, 2), 'utf8');
+}
+
+function listManagedScripts() {
+  const items = readManagedScripts().filter((item) => {
+    const name = str(item.name, 255);
+    const destination = str(item.destination, 1000);
+    return name && name === path.basename(name) && SCRIPT_EXTENSIONS.test(name) && isDir(destination) && fs.existsSync(path.join(destination, name));
+  });
+  return { ok: true, scripts: items };
+}
+
+function removeManagedScript(destination, name) {
+  destination = str(destination, 1000);
+  name = str(name, 255);
+  if (!destination || !name || name !== path.basename(name)) return { ok: false, error: 'Invalid managed script.' };
+  const items = readManagedScripts();
+  const match = items.find((item) => item.destination === destination && item.name === name);
+  if (!match) return { ok: false, error: 'YuniHub can only remove scripts it previously installed.' };
+  const file = path.join(destination, name);
+  try {
+    if (fs.lstatSync(file).isFile()) fs.unlinkSync(file);
+    writeManagedScripts(items.filter((item) => item !== match));
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+function readScriptSource(selection, userFolder) {
+  const script = resolveScript(selection, userFolder);
+  if (!script) return { ok: false, error: 'That script is no longer available.' };
+  try {
+    const stat = fs.statSync(script.filePath);
+    if (stat.size > 256 * 1024) return { ok: false, error: 'Script previews are limited to 256 KB.' };
+    return { ok: true, script: { ...script.metadata, source: script.source, name: script.name, supportsAutoload: script.supportsAutoload }, text: fs.readFileSync(script.filePath, 'utf8') };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function acknowledgeScriptBundle(version) {
+  const catalog = readScriptCatalog();
+  if (str(version, 40) !== catalog.version) return { ok: false, error: 'The script bundle changed. Refresh the library and try again.' };
+  try {
+    fs.mkdirSync(path.dirname(SCRIPT_BUNDLE_STATE_FILE()), { recursive: true });
+    fs.writeFileSync(SCRIPT_BUNDLE_STATE_FILE(), JSON.stringify({ version }, null, 2), 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function copySelectedScripts(selection, userFolder, autoexecFolder, executorPath, action, replaceExisting) {
+  if (!Array.isArray(selection) || !selection.length || selection.length > 50) {
+    return { ok: false, error: 'Select between 1 and 50 scripts.' };
+  }
+  const mode = action === 'autoload' ? 'autoload' : 'executor';
+  let destination = '';
+  if (mode === 'autoload') {
+    destination = str(autoexecFolder, 1000);
+    if (!destination || !isDir(destination)) return { ok: false, error: 'Choose an existing executor autoload folder in Settings.' };
+  } else {
+    executorPath = str(executorPath, 1000);
+    try {
+      if (!executorPath || !fs.statSync(executorPath).isFile()) return { ok: false, error: 'Choose a valid executor application in Settings.' };
+      destination = path.dirname(executorPath);
+    } catch {
+      return { ok: false, error: 'Choose a valid executor application in Settings.' };
+    }
+  }
+
+  const scripts = selection.map((item) => resolveScript(item, userFolder));
+  if (scripts.some((item) => !item)) return { ok: false, error: 'A selected script is no longer available. Refresh the library and try again.' };
+  if (mode === 'autoload' && scripts.some((item) => !item.supportsAutoload)) {
+    return { ok: false, error: 'One or more selected scripts do not declare executor autoload support.' };
+  }
+  if (new Set(scripts.map((item) => item.name.toLowerCase())).size !== scripts.length) {
+    return { ok: false, error: 'Selected scripts contain duplicate filenames.' };
+  }
+  const existing = scripts.filter((item) => fs.existsSync(path.join(destination, item.name)));
+  if (existing.length && !replaceExisting) return { ok: false, conflict: true, conflicts: existing.map((item) => item.name) };
+
+  try {
+    const replacements = [];
+    if (existing.length) {
+      const backupDir = path.join(app.getPath('userData'), 'script-backups', `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      fs.mkdirSync(backupDir, { recursive: true });
+      for (const item of existing) {
+        const target = path.join(destination, item.name);
+        if (!fs.lstatSync(target).isFile()) return { ok: false, error: `Cannot replace non-file destination ${item.name}.` };
+        fs.copyFileSync(target, path.join(backupDir, item.name), fs.constants.COPYFILE_EXCL);
+        replacements.push({ name: item.name, backup: path.join(backupDir, item.name) });
+      }
+    }
+    const replacedNames = new Set(existing.map((item) => item.name));
+    for (const script of scripts) {
+      const flags = replacedNames.has(script.name) ? 0 : fs.constants.COPYFILE_EXCL;
+      fs.copyFileSync(script.filePath, path.join(destination, script.name), flags);
+    }
+    const managed = readManagedScripts().filter((item) => !(item.destination === destination && scripts.some((script) => script.name === item.name)));
+    managed.push(...scripts.map((item) => ({ destination, name: item.name, source: item.source, action, installedAt: Date.now() })));
+    writeManagedScripts(managed);
+    return { ok: true, count: scripts.length, files: scripts.map((item) => item.name), replacements };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function watchUserScripts(userFolder) {
+  userFolder = str(userFolder, 1000);
+  if (scriptWatcher) {
+    await scriptWatcher.close();
+    scriptWatcher = null;
+  }
+  clearTimeout(scriptChangeTimer);
+  if (!userFolder || !isDir(userFolder)) return { ok: true, watching: false };
+  scriptWatcher = chokidar.watch(userFolder, {
+    ignoreInitial: true,
+    depth: 0,
+    awaitWriteFinish: { stabilityThreshold: 250, pollInterval: 100 }
+  });
+  const changed = () => {
+    clearTimeout(scriptChangeTimer);
+    scriptChangeTimer = setTimeout(() => {
+      if (win && !win.isDestroyed()) win.webContents.send('scripts:changed');
+    }, 250);
+  };
+  for (const event of ['add', 'change', 'unlink']) scriptWatcher.on(event, changed);
+  scriptWatcher.on('error', (error) => {
+    if (win && !win.isDestroyed()) win.webContents.send('scripts:watch-error', str(error.message, 300));
+  });
+  return { ok: true, watching: true };
 }
 
 function registerIpc() {
@@ -416,7 +711,22 @@ function registerIpc() {
   handle('project:code', (folder) => openInCode(folder));
 
   handle('tool:weather', (city) => getWeather(city));
-  handle('tool:autoload', (s, d) => autoLoad(s, d));
+  handle('tool:listScripts', (userFolder) => listScripts(userFolder));
+  handle('tool:readScript', (selection, userFolder) => readScriptSource(selection, userFolder));
+  handle('tool:listManagedScripts', () => listManagedScripts());
+  handle('tool:removeManagedScript', (destination, name) => removeManagedScript(destination, name));
+  handle('tool:openScriptBackups', async () => {
+    const directory = path.join(app.getPath('userData'), 'script-backups');
+    fs.mkdirSync(directory, { recursive: true });
+    const error = await shell.openPath(directory);
+    return error ? { ok: false, error } : { ok: true };
+  });
+  handle('tool:ackScriptBundle', (version) => acknowledgeScriptBundle(version));
+  handle('tool:watchScripts', (userFolder) => watchUserScripts(userFolder));
+  handle('tool:copyScripts', (request) => {
+    const r = request || {};
+    return copySelectedScripts(r.selection, r.userFolder, r.autoexecFolder, r.executorPath, r.action, r.replaceExisting);
+  });
   handle('rpc:connect', (id) => rpcConnect(str(id, 30)));
   handle('rpc:disconnect', () => { rpcDisconnect(); return true; });
   handle('rpc:activity', (activity) => {
@@ -448,6 +758,23 @@ function registerIpc() {
       weatherCity: system.city,
       buildMode: APP_MODE
     };
+  });
+
+  handle('update:state', () => updateState);
+  handle('update:check', async () => {
+    if (!app.isPackaged) return { ok: false, error: 'Update checks are available in installed builds.' };
+    try { await autoUpdater.checkForUpdates(); return { ok: true }; }
+    catch (error) { return { ok: false, error: error.message || 'Could not check for updates.' }; }
+  });
+  handle('update:download', async () => {
+    if (!app.isPackaged || updateState.status !== 'available') return { ok: false, error: 'There is no update ready to download.' };
+    try { await autoUpdater.downloadUpdate(); return { ok: true }; }
+    catch (error) { return { ok: false, error: error.message || 'Could not download the update.' }; }
+  });
+  handle('update:install', () => {
+    if (!app.isPackaged || updateState.status !== 'downloaded') return { ok: false, error: 'Download an update before installing it.' };
+    autoUpdater.quitAndInstall(true, true);
+    return { ok: true };
   });
 
   handle('app:setPrefs', (p) => ({ hotkeyOk: applyPrefs(p || {}) }));
@@ -494,8 +821,8 @@ function registerIpc() {
     return app.getLoginItemSettings().openAtLogin;
   });
 
-  handle('app:setTheme', (theme) => {
-    const t = THEMES[theme] || THEMES.dark;
+  handle('app:setTheme', (theme, customBackground) => {
+    const t = resolveTheme(theme, customBackground);
     if (win && !isLinux && win.setTitleBarOverlay) win.setTitleBarOverlay({ color: t.color, symbolColor: t.symbolColor, height: 40 });
     if (win) win.setBackgroundColor(t.color);
     return true;
@@ -569,7 +896,7 @@ function loadBounds() {
   try {
     const b = JSON.parse(fs.readFileSync(boundsFile(), 'utf8'));
     const ok = ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(b[k]));
-    if (!ok || b.width < 960 || b.height < 620) return null;
+    if (!ok || b.width < 760 || b.height < 500) return null;
     // Only reuse the position if it is still on a connected screen.
     const visible = screen.getAllDisplays().some((d) => {
       const a = d.workArea;
@@ -591,21 +918,22 @@ function saveBounds() {
 
 function createWindow() {
   const saved = loadData();
-  const theme = saved && saved.settings && saved.settings.theme === 'rei' ? 'rei' : 'dark';
-  const t = THEMES[theme];
+  const settings = saved && saved.settings || {};
+  const theme = ['rei', 'custom'].includes(settings.theme) ? settings.theme : 'dark';
+  const t = resolveTheme(theme, settings.customTheme && settings.customTheme.background);
   const b = loadBounds() || {};
 
   win = new BrowserWindow({
     width: b.width || 1240,
     height: b.height || 800,
     ...(Number.isFinite(b.x) ? { x: b.x, y: b.y } : {}),
-    minWidth: 960,
-    minHeight: 620,
+    minWidth: 760,
+    minHeight: 500,
     show: false,
     title: 'YuniHub',
     backgroundColor: t.color,
     autoHideMenuBar: true,
-    icon: path.join(__dirname, 'build', 'icon.png'),
+    icon: ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -657,6 +985,7 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null);
     registerIpc();
     createWindow();
+    if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
     const saved = loadData();
     if (saved && saved.settings) applyPrefs(saved.settings);
     const initialUrl = process.argv.find((arg) => /^yunihub:\/\//.test(arg));
@@ -671,7 +1000,11 @@ if (!app.requestSingleInstanceLock()) {
     handleDiscordProtocol(url);
   });
 
-  app.on('before-quit', () => { quitting = true; });
+  app.on('before-quit', () => {
+    quitting = true;
+    if (scriptWatcher) { scriptWatcher.close(); scriptWatcher = null; }
+    clearTimeout(scriptChangeTimer);
+  });
   app.on('will-quit', () => { globalShortcut.unregisterAll(); rpcDisconnect(); if (beaconServer) beaconServer.close(); });
 
   app.on('window-all-closed', () => {

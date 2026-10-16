@@ -13,16 +13,42 @@ contextBridge.exposeInMainWorld('hub', {
   openCode: (folder) => call('project:code', folder),
   openUrl: (url) => call('app:openUrl', url),
   info: () => call('app:info'),
+  updateState: () => call('update:state'),
+  checkUpdates: () => call('update:check'),
+  downloadUpdate: () => call('update:download'),
+  installUpdate: () => call('update:install'),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('update:status', listener);
+    return () => ipcRenderer.removeListener('update:status', listener);
+  },
   getMode: () => call('app:info').then((d) => d && d.buildMode ? d.buildMode : 'release'),
   setLogin: (on) => call('app:setLogin', on),
   setPrefs: (prefs) => call('app:setPrefs', prefs),
-  setTheme: (theme) => call('app:setTheme', theme),
+  setTheme: (theme, customBackground) => call('app:setTheme', theme, customBackground),
   openBackups: () => call('app:openBackups'),
   exportData: (json) => call('data:export', json),
   importData: () => call('data:import'),
   dirOf: (p) => call('path:dir', p),
   weather: (city) => call('tool:weather', city),
-  autoload: (src, dest) => call('tool:autoload', src, dest),
+  listScripts: (userFolder) => call('tool:listScripts', userFolder),
+  readScript: (selection, userFolder) => call('tool:readScript', selection, userFolder),
+  listManagedScripts: () => call('tool:listManagedScripts'),
+  removeManagedScript: (destination, name) => call('tool:removeManagedScript', destination, name),
+  openScriptBackups: () => call('tool:openScriptBackups'),
+  acknowledgeScriptBundle: (version) => call('tool:ackScriptBundle', version),
+  watchScripts: (userFolder) => call('tool:watchScripts', userFolder),
+  copyScripts: (request) => call('tool:copyScripts', request),
+  onScriptsChanged: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('scripts:changed', listener);
+    return () => ipcRenderer.removeListener('scripts:changed', listener);
+  },
+  onScriptsWatchError: (callback) => {
+    const listener = (_event, message) => callback(message);
+    ipcRenderer.on('scripts:watch-error', listener);
+    return () => ipcRenderer.removeListener('scripts:watch-error', listener);
+  },
   discordAuth: () => call('app:discordAuth'),
   discordExchange: (ticket) => call('app:discordExchange', ticket),
   discordSession: (sessionToken) => call('app:discordSession', sessionToken),
