@@ -102,7 +102,7 @@ import { setPlexus } from './plexus.js';
 
   /* ---------- data ---------- */
   const DEFAULT_CUSTOM_THEME = { background: '#101114', accent: '#ff5264', surface: '#1b1d22' };
-  const EXTRA = { city: '', exe: '', scripts: '', autoexec: '', executorProfiles: [], activeExecutorProfile: '', customTheme: { ...DEFAULT_CUSTOM_THEME }, discordUser: null, beacons: { youtube: false, twitch: false } };
+  const EXTRA = { city: '', exe: '', scripts: '', autoexec: '', executorProfiles: [], activeExecutorProfile: '', customTheme: { ...DEFAULT_CUSTOM_THEME }, savedThemes: [], discordUser: null, beacons: { youtube: false, twitch: false } };
   const validHex = (value, fallback) => /^#[0-9a-f]{6}$/i.test(value || '') ? value.toUpperCase() : fallback;
   let appMode = 'release';
   const canEditProjects = () => appMode === 'dev';
@@ -173,6 +173,13 @@ import { setPlexus } from './plexus.js';
           accent: validHex(s.customTheme && s.customTheme.accent, DEFAULT_CUSTOM_THEME.accent),
           surface: validHex(s.customTheme && s.customTheme.surface, DEFAULT_CUSTOM_THEME.surface)
         },
+        savedThemes: (Array.isArray(s.savedThemes) ? s.savedThemes : []).slice(0, 30).map((x) => ({
+          id: clip(x && x.id, 40) || uid(), name: clip(x && x.name, 30) || 'Saved theme', desc: clip(x && x.desc, 90),
+          background: validHex(x && x.background, DEFAULT_CUSTOM_THEME.background),
+          accent: validHex(x && x.accent, DEFAULT_CUSTOM_THEME.accent),
+          surface: validHex(x && x.surface, DEFAULT_CUSTOM_THEME.surface),
+          pinned: !!(x && x.pinned)
+        })),
         sort: SORTS.some((x) => x[0] === s.sort) ? s.sort : 'manual',
         closeToTray: !!s.closeToTray, hotkey: !!s.hotkey, welcomeSeen: !!s.welcomeSeen,
         compactMode: !!s.compactMode, reduceMotion: !!s.reduceMotion,
@@ -321,7 +328,7 @@ import { setPlexus } from './plexus.js';
     root.setAttribute('data-theme', theme);
     root.setAttribute('data-density', S.settings.compactMode ? 'compact' : 'comfortable');
     root.setAttribute('data-motion', S.settings.reduceMotion ? 'reduced' : 'full');
-    const customProperties = ['--bg', '--glow1', '--glow2', '--glass', '--glass-2', '--glass-3', '--line', '--line-2', '--text', '--muted', '--faint', '--a1', '--a2', '--btn', '--btn-text', '--btn-shadow', '--eye', '--shadow', '--input', '--modal', '--scroll', '--edge'];
+    const customProperties = ['--bg', '--glow1', '--glow2', '--glass', '--glass-2', '--glass-3', '--line', '--line-2', '--text', '--muted', '--faint', '--a1', '--a2', '--btn', '--btn-text', '--btn-shadow', '--eye', '--shadow', '--input', '--modal', '--scroll', '--edge', '--tint', '--tint-deep', '--logo-hue'];
     if (theme === 'custom') {
       const palette = S.settings.customTheme;
       const rgb = (color) => color.match(/[\da-f]{2}/gi).map((part) => parseInt(part, 16));
@@ -331,6 +338,13 @@ import { setPlexus } from './plexus.js';
         return .2126 * red + .7152 * green + .0722 * blue;
       };
       const shade = (color, factor) => `#${rgb(color).map((part) => Math.round(part * factor).toString(16).padStart(2, '0')).join('')}`;
+      const hueOf = (color) => {
+        const [r, g, b] = rgb(color).map((part) => part / 255);
+        const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+        if (!d) return 350;
+        const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+        return (h * 60 + 360) % 360;
+      };
       const light = luminance(palette.background) > .56;
       const lightAccent = luminance(palette.accent) > .62;
       root.style.colorScheme = light ? 'light' : 'dark';
@@ -356,7 +370,10 @@ import { setPlexus } from './plexus.js';
         '--input': rgba(palette.surface, light ? .92 : .58),
         '--modal': palette.surface,
         '--scroll': rgba(palette.accent, .28),
-        '--edge': rgba(palette.accent, .45)
+        '--edge': rgba(palette.accent, .45),
+        '--tint': rgb(palette.accent).join(','),
+        '--tint-deep': rgb(shade(palette.accent, .72)).join(','),
+        '--logo-hue': `${Math.round(hueOf(palette.accent) - 350)}deg`
       };
       for (const [property, value] of Object.entries(values)) root.style.setProperty(property, value);
       API.setTheme(theme, palette.background);
@@ -1049,8 +1066,18 @@ import { setPlexus } from './plexus.js';
   }
 
   function viewSettings() {
-    const th = (id, label) => `<button class="theme-opt" data-act="theme" data-v="${id}" data-k="th-${id}" aria-pressed="${S.settings.theme === id}">
-        <span class="swatch s-${id}"${id === 'custom' ? ` style="--custom-bg:${S.settings.customTheme.background};--custom-surface:${S.settings.customTheme.surface};--custom-accent:${S.settings.customTheme.accent}"` : ''}><i></i><i></i></span><b>${label}</b></button>`;
+    const th = (id, label, desc) => `<button class="theme-opt" data-act="theme" data-v="${id}" data-k="th-${id}" aria-pressed="${S.settings.theme === id}">
+        <span class="swatch s-${id}"${id === 'custom' ? ` style="--custom-bg:${S.settings.customTheme.background};--custom-surface:${S.settings.customTheme.surface};--custom-accent:${S.settings.customTheme.accent}"` : ''}><i></i><i></i></span><b>${label}</b>${desc ? `<small>${desc}</small>` : ''}</button>`;
+    const sameTheme = (x) => S.settings.theme === 'custom' && ['background', 'accent', 'surface'].every((k) => S.settings.customTheme[k] === x[k]);
+    const saved = [...S.settings.savedThemes].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+    const swatchOf = (x) => `--custom-bg:${x.background};--custom-surface:${x.surface};--custom-accent:${x.accent}`;
+    const pinTile = (x) => `<button class="theme-opt" data-act="theme-load" data-id="${esc(x.id)}" data-k="thl-${esc(x.id)}" aria-pressed="${sameTheme(x)}" title="${esc(x.desc)}"><span class="swatch s-custom" style="${swatchOf(x)}"><i></i><i></i></span><b>${esc(x.name)}</b>${x.desc ? `<small>${esc(x.desc)}</small>` : ''}</button>`;
+    const savedRow = (x) => `<div class="saved-theme${sameTheme(x) ? ' on' : ''}"><span class="st-dots"><i style="background:${x.background}"></i><i style="background:${x.surface}"></i><i style="background:${x.accent}"></i></span>
+        <div class="t"><b>${esc(x.name)}</b><span class="help">${esc(x.desc || 'No description')}</span></div>
+        <div class="st-actions"><button class="textbtn" data-act="theme-load" data-id="${esc(x.id)}" data-k="stl-${esc(x.id)}">Load</button>
+          <button class="textbtn" data-act="theme-update" data-id="${esc(x.id)}" data-k="stu-${esc(x.id)}">Update colors</button>
+          <button class="st-pin${x.pinned ? ' on' : ''}" data-act="theme-pin" data-id="${esc(x.id)}" data-k="stp-${esc(x.id)}" aria-pressed="${!!x.pinned}" aria-label="${x.pinned ? 'Unpin' : 'Pin'} ${esc(x.name)}" title="${x.pinned ? 'Unpin from theme picker' : 'Pin to theme picker'}">${x.pinned ? '\u2605' : '\u2606'}</button>
+          <button class="textbtn st-del${ui.confirmThemeDel === x.id ? ' armed' : ''}" data-act="theme-del" data-id="${esc(x.id)}" data-k="std-${esc(x.id)}">${ui.confirmThemeDel === x.id ? 'Confirm delete' : 'Delete'}</button></div></div>`;
     const sw = (id, title, sub, on) => `<div class="switch-row"><div class="t"><b>${title}</b><span class="help">${sub}</span></div>
         <input type="checkbox" class="switch" id="${id}" data-act="${id}" ${on ? 'checked' : ''} aria-label="${title}"></div>`;
     const keys = [['Ctrl K', 'Search and jump anywhere'], ['Ctrl N', 'New project'], ['Ctrl 1 to 8', 'Home, Spotify, Roblox, Discord, Android, PC, PS4, Settings'], ['/', 'Filter the project list'], ['Esc', 'Close or go back']];
@@ -1058,9 +1085,16 @@ import { setPlexus } from './plexus.js';
     <div class="set-grid">
       ${intPanel()}
       <section class="panel"><h3>Appearance</h3>
-        <div class="themes">${th('dark', 'Midnight')}${th('rei', 'Rei light')}${th('dehbify', 'Dehbify')}${th('custom', 'Custom')}</div>
+        <div class="themes">${th('dark', 'Midnight', 'Red and black glass.')}${th('rei', 'Rei light', 'Soft light with red accents.')}${th('dehbify', 'Dehabify', 'Green and purple plexus.')}${th('custom', 'Custom', 'Your own colors.')}${saved.filter((x) => x.pinned).map(pinTile).join('')}</div>
+        ${S.settings.theme === 'dehbify' ? '<div class="theme-credit" aria-label="Theme credit"><span>Theme credit</span><b>Shout Out hbmi &lt;3</b></div>' : ''}
         <div class="custom-palette"><div class="palette-title"><span class="label">Custom colors</span><button class="textbtn" data-act="theme-reset" data-k="theme-reset">Reset</button></div>
           ${[['background', 'Window'], ['accent', 'Accent'], ['surface', 'Surfaces']].map(([key, label]) => `<label class="color-setting"><span>${label}</span><input type="color" value="${esc(S.settings.customTheme[key])}" data-theme-color="${key}" aria-label="Custom theme ${label.toLowerCase()} color"></label>`).join('')}
+        </div>
+        <div class="saved-themes"><div class="palette-title"><span class="label">Save current custom colors</span></div>
+          <input class="in" id="st-name" placeholder="Theme name" maxlength="30" aria-label="Theme name">
+          <input class="in" id="st-desc" placeholder="Description (optional)" maxlength="90" aria-label="Theme description">
+          <div class="row"><button class="btn primary" data-act="theme-save" data-k="theme-save">Save theme</button></div>
+          ${saved.length ? `<div class="saved-list">${saved.map(savedRow).join('')}</div>` : '<p class="help">Saved themes show up here. Pin one with the star to add it to the theme picker.</p>'}
         </div>
         <div class="pref-list">
           ${sw('compactMode', 'Compact project cards', 'Fit more projects on screen with tighter spacing.', S.settings.compactMode)}
@@ -1385,6 +1419,43 @@ import { setPlexus } from './plexus.js';
       case 'profile-new': createExecutorProfile(); break;
       case 'profile-save': saveExecutorProfile(); break;
       case 'profile-delete': deleteExecutorProfile(); break;
+      case 'theme-save': {
+        const name = clip(document.getElementById('st-name')?.value, 30);
+        if (!name) { toast('Give this theme a name first.', 'err'); break; }
+        const desc = clip(document.getElementById('st-desc')?.value, 90);
+        const ct = S.settings.customTheme;
+        const same = S.settings.savedThemes.find((x) => x.name.toLowerCase() === name.toLowerCase());
+        if (same) { Object.assign(same, { desc, background: ct.background, accent: ct.accent, surface: ct.surface }); toast(`Updated ${same.name}.`, 'ok'); }
+        else {
+          if (S.settings.savedThemes.length >= 30) { toast('You can save up to 30 themes.', 'err'); break; }
+          S.settings.savedThemes.push({ id: uid(), name, desc, background: ct.background, accent: ct.accent, surface: ct.surface, pinned: false });
+          toast(`Saved ${name}.`, 'ok');
+        }
+        touch(); render();
+      } break;
+      case 'theme-load': {
+        const st = S.settings.savedThemes.find((x) => x.id === t.dataset.id);
+        if (!st) break;
+        S.settings.customTheme = { background: st.background, accent: st.accent, surface: st.surface };
+        S.settings.theme = 'custom';
+        applyTheme(); touch(); render();
+      } break;
+      case 'theme-update': {
+        const st = S.settings.savedThemes.find((x) => x.id === t.dataset.id);
+        if (!st) break;
+        const ct = S.settings.customTheme;
+        Object.assign(st, { background: ct.background, accent: ct.accent, surface: ct.surface });
+        toast(`${st.name} updated with the current colors.`, 'ok'); touch(); render();
+      } break;
+      case 'theme-pin': {
+        const st = S.settings.savedThemes.find((x) => x.id === t.dataset.id);
+        if (st) { st.pinned = !st.pinned; touch(); render(); }
+      } break;
+      case 'theme-del': {
+        if (ui.confirmThemeDel !== t.dataset.id) { ui.confirmThemeDel = t.dataset.id; render(); break; }
+        S.settings.savedThemes = S.settings.savedThemes.filter((x) => x.id !== t.dataset.id);
+        ui.confirmThemeDel = null; touch(); render();
+      } break;
       case 'theme-reset': {
         S.settings.customTheme = { ...DEFAULT_CUSTOM_THEME };
         S.settings.theme = 'custom';

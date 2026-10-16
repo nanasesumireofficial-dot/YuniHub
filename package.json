@@ -35,7 +35,9 @@
       "yuniku-scripts/**/*",
       "build/icon.png",
       "build/yunihub-icon.svg",
+      "build/yunihub-icon-dehbify.svg",
       "yunihub-logo-wordmark.svg",
+      "yunihub-logo-wordmark-dehbify.svg",
       "package.json"
     ],
     "win": {
