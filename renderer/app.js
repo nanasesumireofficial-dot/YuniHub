@@ -278,6 +278,12 @@ import { createScriptSearch } from './script-search.mjs';
   let scriptEditor = null;
   let watchedScriptsPath = null;
   let installedScripts = [];
+  let presenceConnected = false;
+  let presenceBusy = false;
+  let presenceMessage = 'Presence is not connected.';
+  let presenceRetryTimer = null;
+  let presenceRetryCount = 0;
+  let presenceManualDisconnect = false;
   let scriptQuery = '';
   let gameFilter = '';
   let executorFilter = '';
@@ -708,12 +714,65 @@ import { createScriptSearch } from './script-search.mjs';
   }
 
   function updateDiscordActivity() {
-    if (!rpcUser) return;
+    if (!presenceConnected) return;
     const p = ui.view === 'project' ? find(ui.id) : null;
-    API.setActivity({
+    Promise.resolve(API.setActivity({
       details: p ? `Working on ${p.name}` : 'Planning projects',
       state: 'In YuniHub'
+    })).then((ok) => {
+      if (ok || !presenceConnected) return;
+      presenceConnected = false;
+      presenceMessage = 'Discord closed the presence connection. Reconnect to try again.';
+      render();
+      scheduleDiscordPresenceRetry();
     });
+  }
+
+  function scheduleDiscordPresenceRetry() {
+    if (presenceManualDisconnect || presenceConnected || presenceRetryTimer || presenceRetryCount >= 12) return;
+    presenceRetryTimer = setTimeout(() => {
+      presenceRetryTimer = null;
+      presenceRetryCount += 1;
+      connectDiscordPresence(false, true);
+    }, 5000);
+  }
+
+  async function connectDiscordPresence(showToast = true, automatic = false) {
+    if (presenceBusy || presenceConnected || (automatic && presenceManualDisconnect)) return;
+    if (!automatic) {
+      presenceManualDisconnect = false;
+      presenceRetryCount = 0;
+      clearTimeout(presenceRetryTimer);
+      presenceRetryTimer = null;
+    }
+    presenceBusy = true;
+    presenceMessage = 'Connecting to the Discord desktop app...';
+    if (!automatic) render();
+    const result = await API.rpcConnect('');
+    presenceBusy = false;
+    presenceConnected = !!(result && result.ok);
+    presenceMessage = presenceConnected
+      ? `Connected to Discord${result.user && result.user.username ? ` as ${result.user.username}` : ''}.`
+      : (result && result.error) || 'Could not connect to Discord Rich Presence.';
+    if (presenceConnected) {
+      presenceRetryCount = 0;
+      clearTimeout(presenceRetryTimer);
+      presenceRetryTimer = null;
+      updateDiscordActivity();
+    } else if (showToast) toast(presenceMessage, 'err');
+    if (!automatic || presenceConnected) render();
+    if (!presenceConnected) scheduleDiscordPresenceRetry();
+  }
+
+  async function disconnectDiscordPresence() {
+    presenceManualDisconnect = true;
+    clearTimeout(presenceRetryTimer);
+    presenceRetryTimer = null;
+    await API.rpcDisconnect();
+    presenceConnected = false;
+    presenceBusy = false;
+    presenceMessage = 'Presence is disconnected.';
+    render();
   }
 
   async function refreshWeather() {
@@ -752,7 +811,7 @@ import { createScriptSearch } from './script-search.mjs';
       `<button class="nav-item${cur === v ? ' on' : ''}" data-act="nav" data-v="${v}" data-k="nav-${v}" aria-label="${label}" title="${label}" aria-current="${cur === v ? 'page' : 'false'}">
         <span class="nav-ic">${svg(icon)}</span><span>${label}</span>${count != null ? `<em>${count}</em>` : ''}</button>`;
     const recent = S.projects.filter((p) => p.opened).sort((a, b) => b.opened - a.opened).slice(0, 3);
-    const linkedUser = S.settings.discordUser || rpcUser;
+    const linkedUser = S.settings.discordSession ? S.settings.discordUser : null;
     const avatarUrl = discordAvatarUrl(linkedUser);
     return `<aside class="side">
       <div class="logo" aria-label="YuniHub">
@@ -778,7 +837,7 @@ import { createScriptSearch } from './script-search.mjs';
         `<button class="rec${ui.view === 'project' && ui.id === p.id ? ' on' : ''}" data-act="open" data-id="${p.id}" data-k="rc-${p.id}">${svg(p.icon)}<span>${esc(p.name)}</span></button>`).join('')}</div>` : ''}
       <div class="spacer"></div>
       <div class="sync-card">
-        <span class="label dot-label"><i class="dot${linkedUser ? '' : ' off'}"></i>${linkedUser ? 'Discord linked' : 'Discord not linked'}</span>
+        <span class="label dot-label"><i class="dot${linkedUser ? '' : ' off'}"></i>${linkedUser ? 'Discord account linked' : 'Guest mode'}</span>
         ${linkedUser
           ? `<div style="display:flex; align-items:center; gap:10px; margin:8px 0 10px;">
               ${avatarUrl ? `<img src="${avatarUrl}" alt="Discord avatar" style="width:34px;height:34px;border-radius:50%;object-fit:cover;display:block;box-shadow:0 0 0 1px rgba(255,255,255,.15);" />` : `<div style="width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#5865f2,#7289da);font-size:12px;font-weight:700;">D</div>`}
@@ -786,9 +845,13 @@ import { createScriptSearch } from './script-search.mjs';
             </div>
             <button class="btn danger" data-act="rpcout" data-k="rpcout">Disconnect</button>`
           : `<button class="btn primary" data-act="rpclink" data-k="rpclink">Connect Discord</button>`}
-        <div class="help" style="margin-top:10px; line-height:1.5;">${linkedUser ? 'Unlocked: profile sync, status checks, and a cleaner YuniHub identity.' : 'Link your Discord to unlock account perks and a more complete YuniHub identity.'}</div>
-        <span class="label">Discord presence</span>
-        <div class="help">Presence is enabled when the build is configured to run with a Discord app ID.</div>
+        <div class="help" style="margin-top:10px; line-height:1.5;">${linkedUser ? 'Profile sync is active: your Discord display name and avatar appear in YuniHub.' : 'Guest mode keeps projects and local tools available on this PC. Link Discord for synced display name and avatar.'}</div>
+        <span class="label dot-label"><i class="dot${presenceConnected ? '' : ' off'}"></i>Discord Rich Presence</span>
+        <div class="help">${esc(presenceMessage)}</div>
+        ${presenceConnected
+          ? '<button class="btn danger" data-act="rpc-presence-disconnect" data-k="rpc-presence-disconnect">Disconnect presence</button>'
+          : `<button class="btn" data-act="rpc-presence-connect" data-k="rpc-presence-connect"${presenceBusy ? ' disabled' : ''}>${presenceBusy ? 'Connecting...' : 'Connect presence'}</button>`}
+        <div class="help presence-config-help">${info.presenceConfigured ? 'Requires the Discord desktop app to be running.' : 'Discord Rich Presence is not configured for this build.'}</div>
       </div>
       <div class="ver">v${esc(info.version || '0.2.0')}</div>
     </aside>`;
@@ -1350,6 +1413,8 @@ import { createScriptSearch } from './script-search.mjs';
         await refreshScripts();
       } break;
       case 'rpclink': await connectRpc(); break;
+      case 'rpc-presence-connect': await connectDiscordPresence(); break;
+      case 'rpc-presence-disconnect': await disconnectDiscordPresence(); break;
       case 'rpcout': {
         await API.rpcDisconnect();
         rpcUser = null;
@@ -1638,6 +1703,7 @@ import { createScriptSearch } from './script-search.mjs';
     refreshScripts();
     if (API.onScriptsChanged) API.onScriptsChanged(() => refreshScripts());
     if (API.onScriptsWatchError) API.onScriptsWatchError((message) => toast(message || 'Could not watch the selected script folder.', 'err'));
+    connectDiscordPresence(false, true);
     if (API.onDiscordAuth) {
       API.onDiscordAuth((payload) => {
         if (!payload || typeof payload !== 'object') return;

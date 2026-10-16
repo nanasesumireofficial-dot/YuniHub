@@ -12,6 +12,7 @@ const isMac = process.platform === 'darwin';
 const isLinux = process.platform === 'linux';
 const APP_MODE = process.argv.includes('--dev') ? 'dev' : 'release';
 const AUTH_SERVER_URL = (process.env.YUNIHUB_AUTH_URL || process.env.AUTH_SERVER_URL || 'https://yunihub-production.up.railway.app').replace(/\/$/, '');
+const DEFAULT_DISCORD_APP_ID = '1511173773204652092';
 
 const THEMES = {
   dark: { color: '#05070d', symbolColor: '#d9dcff' },
@@ -321,8 +322,8 @@ function rpcConnect(clientId) {
   rpcDisconnect();
   return new Promise((resolve) => {
     const normalizedClientId = str(clientId, 30) || (APP_MODE === 'dev'
-      ? (process.env.YUNIHUB_DISCORD_APP_ID_DEV || process.env.DISCORD_APP_ID_DEV || process.env.DISCORD_APP_ID || '')
-      : (process.env.YUNIHUB_DISCORD_APP_ID || process.env.DISCORD_APP_ID || ''));
+      ? (process.env.YUNIHUB_DISCORD_APP_ID_DEV || process.env.DISCORD_APP_ID_DEV || process.env.DISCORD_APP_ID || DEFAULT_DISCORD_APP_ID)
+      : (process.env.YUNIHUB_DISCORD_APP_ID || process.env.DISCORD_APP_ID || DEFAULT_DISCORD_APP_ID));
 
     if (!/^\d{15,25}$/.test(normalizedClientId)) return resolve({ ok: false, error: 'Discord presence is not configured for this build.' });
 
@@ -756,7 +757,8 @@ function registerIpc() {
       openAtLogin: app.getLoginItemSettings().openAtLogin,
       userName: system.name,
       weatherCity: system.city,
-      buildMode: APP_MODE
+      buildMode: APP_MODE,
+      presenceConfigured: /^\d{15,25}$/.test(DEFAULT_DISCORD_APP_ID)
     };
   });
 

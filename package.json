@@ -23,7 +23,7 @@
   "build": {
     "appId": "com.yunihub.app",
     "productName": "YuniHub",
-    "publish": [{ "provider": "github", "owner": "toxicdrewzz-ctrl", "repo": "YuniHub" }],
+    "publish": [{ "provider": "github", "owner": "nanasesumireofficial-dot", "repo": "YuniHub" }],
     "directories": {
       "output": "dist",
       "buildResources": "build"
