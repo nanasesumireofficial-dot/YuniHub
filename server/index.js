@@ -245,7 +245,8 @@ async function finishDiscordAuth(req, res, requestUrl) {
   if (!tokenResponse.ok || !tokenData.access_token) {
     console.error('[discord token exchange failed]', tokenResponse.status, tokenText.slice(0, 300), '| redirect_uri sent:', JSON.stringify(config.redirectUri), '| client_id:', config.clientId, '| secret_length:', config.clientSecret.length);
     res.setHeader('set-cookie', clearCookie);
-    sendErrorPage(res, 502, 'Discord could not complete sign-in. Please try again.');
+    const why = tokenData.error ? `${tokenData.error}${tokenData.error_description ? ' - ' + tokenData.error_description : ''}` : `HTTP ${tokenResponse.status}`;
+    sendErrorPage(res, 502, `Discord could not complete sign-in. Please try again. (Discord said: ${why})`);
     return;
   }
 
