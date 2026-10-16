@@ -1,4 +1,5 @@
 import { createScriptSearch } from './script-search.mjs';
+import { setPlexus } from './plexus.js';
 
 'use strict';
 (function () {
@@ -166,7 +167,7 @@ import { createScriptSearch } from './script-search.mjs';
       version: 2,
       settings: {
         name: clip(s.name, 40), hubName: clip(s.hubName, 30) || 'YuniHub',
-        theme: ['dark', 'rei', 'custom'].includes(s.theme) ? s.theme : 'dark',
+        theme: ['dark', 'rei', 'dehbify', 'custom'].includes(s.theme) ? s.theme : 'dark',
         customTheme: {
           background: validHex(s.customTheme && s.customTheme.background, DEFAULT_CUSTOM_THEME.background),
           accent: validHex(s.customTheme && s.customTheme.accent, DEFAULT_CUSTOM_THEME.accent),
@@ -369,6 +370,7 @@ import { createScriptSearch } from './script-search.mjs';
       for (const property of customProperties) root.style.removeProperty(property);
       API.setTheme(theme);
     }
+    setPlexus(theme === 'dehbify', S.settings.reduceMotion);
   }
 
   /* ---------- toast (with optional action, used for undo) ---------- */
@@ -612,7 +614,7 @@ import { createScriptSearch } from './script-search.mjs';
         label: 'A HOME FOR WHAT YOU BUILD',
         title: 'Welcome to YuniHub.',
         copy: 'Keep the projects you care about, the next steps, and the tools to launch them together.',
-        visual: `<div class="welcome-brand-panel"><img src="../yunihub-logo-wordmark.svg" alt="YuniHub" /><span>PROJECTS <i></i> PROGRESS <i></i> MOMENTUM</span></div>`
+        visual: `<div class="welcome-brand-panel"><img src="../yunihub-logo-wordmark.svg" alt="YuniHub" /><span>All In One Hub For Anything. <i></i> Competieve. <i></i> More To Come.</span></div>`
       },
       {
         label: 'MAKE PROGRESS VISIBLE',
@@ -1056,7 +1058,7 @@ import { createScriptSearch } from './script-search.mjs';
     <div class="set-grid">
       ${intPanel()}
       <section class="panel"><h3>Appearance</h3>
-        <div class="themes">${th('dark', 'Midnight')}${th('rei', 'Rei light')}${th('custom', 'Custom')}</div>
+        <div class="themes">${th('dark', 'Midnight')}${th('rei', 'Rei light')}${th('dehbify', 'Dehbify')}${th('custom', 'Custom')}</div>
         <div class="custom-palette"><div class="palette-title"><span class="label">Custom colors</span><button class="textbtn" data-act="theme-reset" data-k="theme-reset">Reset</button></div>
           ${[['background', 'Window'], ['accent', 'Accent'], ['surface', 'Surfaces']].map(([key, label]) => `<label class="color-setting"><span>${label}</span><input type="color" value="${esc(S.settings.customTheme[key])}" data-theme-color="${key}" aria-label="Custom theme ${label.toLowerCase()} color"></label>`).join('')}
         </div>

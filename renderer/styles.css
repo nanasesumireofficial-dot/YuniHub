@@ -870,3 +870,34 @@ html[data-motion="reduced"] .script-row { transition: none !important; }
 }
 @media (prefers-reduced-motion: reduce) { .script-title { transition: none !important; } }
 html[data-motion="reduced"] .script-title { transition: none !important; }
+
+/* ---------- Dehbify: green + purple plexus/wireframe ---------- */
+:root[data-theme="dehbify"] {
+  color-scheme: dark;
+  --bg: #05060d;
+  --glow1: rgba(168, 85, 247, .20); --glow2: rgba(57, 255, 150, .10);
+  --glass: rgba(14, 10, 28, .52); --glass-2: rgba(22, 14, 42, .66); --glass-3: rgba(40, 24, 70, .78);
+  --line: rgba(168, 85, 247, .20); --line-2: rgba(57, 255, 150, .42); --edge: rgba(168, 85, 247, .55);
+  --text: #f1eeff; --muted: #b6aad6; --faint: #8176a3;
+  --a1: #39ff96; --a2: #a855f7;
+  --btn: linear-gradient(135deg, #39ff96, #a855f7); --btn-text: #07040f; --btn-shadow: rgba(120, 120, 220, .38);
+  --ok: #39ff96; --ok-bg: rgba(57, 255, 150, .12);
+  --warn: #f6c453; --warn-bg: rgba(246, 196, 83, .12);
+  --bad: #ff6b9a; --bad-bg: rgba(255, 107, 154, .13);
+  --info: #c18cff; --info-bg: rgba(168, 85, 247, .14);
+  --eye: #39ff96;
+  --shadow: 0 18px 50px rgba(0, 0, 0, .55);
+  --input: rgba(8, 5, 20, .55); --modal: #0d0a1c; --scroll: rgba(168, 85, 247, .32);
+}
+#plexus { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+#plexus ~ #app { position: relative; z-index: 1; }
+:root[data-theme="dehbify"] body {
+  background:
+    radial-gradient(900px 600px at 50% 62%, rgba(168, 85, 247, .16), transparent 65%),
+    radial-gradient(700px 420px at 12% -8%, rgba(57, 255, 150, .12), transparent 60%),
+    var(--bg);
+}
+:root[data-theme="dehbify"] .side { box-shadow: 8px 0 40px -14px var(--edge); }
+.swatch.s-dehbify { background: radial-gradient(120px 60px at 25% 0, rgba(57, 255, 150, .38), transparent 70%), radial-gradient(120px 60px at 80% 100%, rgba(168, 85, 247, .42), transparent 70%), #07060f; }
+.swatch.s-dehbify i:first-child { background: rgba(168, 85, 247, .22); }
+.swatch.s-dehbify i:last-child { background: linear-gradient(135deg, #39ff96, #a855f7); opacity: .9; }

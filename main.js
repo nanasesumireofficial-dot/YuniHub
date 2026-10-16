@@ -17,6 +17,7 @@ const DEFAULT_DISCORD_APP_ID = '1511173773204652092';
 const THEMES = {
   dark: { color: '#05070d', symbolColor: '#d9dcff' },
   rei: { color: '#e8f1fa', symbolColor: '#1b3550' },
+  dehbify: { color: '#05060d', symbolColor: '#a6ffd0' },
   custom: { color: '#101114', symbolColor: '#ffffff' }
 };
 const validHexColor = (value) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
@@ -825,7 +826,9 @@ function registerIpc() {
 
   handle('app:setTheme', (theme, customBackground) => {
     const t = resolveTheme(theme, customBackground);
-    if (win && !isLinux && win.setTitleBarOverlay) win.setTitleBarOverlay({ color: t.color, symbolColor: t.symbolColor, height: 40 });
+    if (win && !isLinux && win.setTitleBarOverlay) {
+      try { win.setTitleBarOverlay({ color: t.color, symbolColor: t.symbolColor, height: 40 }); } catch { /* window has no titlebar overlay */ }
+    }
     if (win) win.setBackgroundColor(t.color);
     return true;
   });
@@ -921,7 +924,7 @@ function saveBounds() {
 function createWindow() {
   const saved = loadData();
   const settings = saved && saved.settings || {};
-  const theme = ['rei', 'custom'].includes(settings.theme) ? settings.theme : 'dark';
+  const theme = ['rei', 'dehbify', 'custom'].includes(settings.theme) ? settings.theme : 'dark';
   const t = resolveTheme(theme, settings.customTheme && settings.customTheme.background);
   const b = loadBounds() || {};
 

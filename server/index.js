@@ -33,11 +33,11 @@ function sendErrorPage(res, status, message) {
 
 function getConfig() {
   const config = {
-    clientId: process.env.DISCORD_CLIENT_ID,
-    clientSecret: process.env.DISCORD_CLIENT_SECRET,
-    redirectUri: process.env.DISCORD_REDIRECT_URI,
-    stateSecret: process.env.OAUTH_STATE_SECRET,
-    appRedirectUri: process.env.YUNIHUB_REDIRECT_URI || 'yunihub://discord-auth'
+    clientId: (process.env.DISCORD_CLIENT_ID || '').trim(),
+    clientSecret: (process.env.DISCORD_CLIENT_SECRET || '').trim(),
+    redirectUri: (process.env.DISCORD_REDIRECT_URI || '').trim(),
+    stateSecret: (process.env.OAUTH_STATE_SECRET || '').trim(),
+    appRedirectUri: (process.env.YUNIHUB_REDIRECT_URI || 'yunihub://discord-auth').trim()
   };
   const missing = Object.entries(config)
     .filter(([key, value]) => key !== 'appRedirectUri' && !value)
@@ -237,8 +237,11 @@ async function finishDiscordAuth(req, res, requestUrl) {
       redirect_uri: config.redirectUri
     })
   });
-  const tokenData = await tokenResponse.json();
+  const tokenText = await tokenResponse.text();
+  let tokenData = {};
+  try { tokenData = JSON.parse(tokenText); } catch {}
   if (!tokenResponse.ok || !tokenData.access_token) {
+    console.error('[discord token exchange failed]', tokenResponse.status, tokenText.slice(0, 300), '| redirect_uri sent:', JSON.stringify(config.redirectUri), '| client_id:', config.clientId);
     res.setHeader('set-cookie', clearCookie);
     sendErrorPage(res, 502, 'Discord could not complete sign-in. Please try again.');
     return;
