@@ -133,7 +133,7 @@ async function refreshDiscordAccessToken(record) {
   const config = getConfig();
   const refreshResponse = await fetch('https://discord.com/api/oauth2/token', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json', 'user-agent': DISCORD_UA },
     body: new URLSearchParams({
       client_id: config.clientId,
       client_secret: config.clientSecret,
@@ -196,6 +196,8 @@ async function startDiscordAuth(res) {
   res.end();
 }
 
+const DISCORD_UA = 'DiscordBot (https://yunihub-production.up.railway.app, 1.0)';
+
 async function finishDiscordAuth(req, res, requestUrl) {
   const config = getConfig();
   const clearCookie = clearStateCookie();
@@ -241,16 +243,16 @@ async function finishDiscordAuth(req, res, requestUrl) {
   let tokenData = {};
   try { tokenData = JSON.parse(tokenText); } catch {}
   if (!tokenResponse.ok || !tokenData.access_token) {
-    console.error('[discord token exchange failed]', tokenResponse.status, tokenText.slice(0, 300), '| redirect_uri sent:', JSON.stringify(config.redirectUri), '| client_id:', config.clientId);
+    console.error('[discord token exchange failed]', tokenResponse.status, tokenText.slice(0, 300), '| redirect_uri sent:', JSON.stringify(config.redirectUri), '| client_id:', config.clientId, '| secret_length:', config.clientSecret.length);
     res.setHeader('set-cookie', clearCookie);
     sendErrorPage(res, 502, 'Discord could not complete sign-in. Please try again.');
     return;
   }
 
   const profileResponse = await fetch('https://discord.com/api/users/@me', {
-    headers: { authorization: `Bearer ${tokenData.access_token}` }
+    headers: { authorization: `Bearer ${tokenData.access_token}`, accept: 'application/json', 'user-agent': DISCORD_UA }
   });
-  const profileData = await profileResponse.json();
+  const profileData = await profileResponse.json().catch(() => ({}));
   if (!profileResponse.ok || !profileData.id) {
     res.setHeader('set-cookie', clearCookie);
     sendErrorPage(res, 502, 'YuniHub could not read your Discord profile. Please try again.');
